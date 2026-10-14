@@ -1,0 +1,24 @@
+services:
+  iris:
+    image: docker.io/intersystemsdc/iris-community:2025.3
+    container_name: irisnative-iris
+    # Both surfaces: 1972 = superserver (the protocol this crate speaks),
+    # 52773 = web/Atelier (used only by probe scripts for cross-checking).
+    ports:
+      - "1972:1972"
+      - "52773:52773"
+    command: --check-caps false
+    environment:
+      - IRIS_PASSWORD=SYS
+    volumes:
+      - iris-data:/iris-mgr
+      - ./docker/init-password.sh:/docker-entrypoint-initdb.d/10-set-password.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "iris session IRIS -U %SYS '##class(%SYSTEM.Process).GetOS()' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  iris-data:

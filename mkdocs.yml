@@ -1,0 +1,28 @@
+site_name: irisnative
+site_description: Rust client for InterSystems IRIS over the native Superserver wire protocol (TCP 1972)
+repo_url: https://github.com/AdriaERNI/rust-irisnative
+site_url: https://adriaerni.github.io/rust-irisnative/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.sections
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Quick start: quickstart.md
+  - The Superserver protocol: protocol.md
+  - API: api.md
