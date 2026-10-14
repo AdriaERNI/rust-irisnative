@@ -24,7 +24,8 @@ of it as TBD.
 
 _TBD — probe planned: deeper byte-dump of a request/reply pair
 (`probes/handshake_dump.py` currently only observes the passive connection
-window; a request-sending framing probe is part of the protocol mission)._
+window; a request-sending framing probe is part of the planned protocol
+work)._
 
 ### Authentication
 
@@ -65,4 +66,4 @@ _TBD._
 ⏳ = untested. A cell turns ✅/❌ only via a green/red run of
 `tests/live.rs --ignored` against that version (today that suite asserts
 TCP reachability and graceful `NotImplemented` only — no matrix cell can
-change from it); date every verdict.
+change from it); date every result.

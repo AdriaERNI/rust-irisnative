@@ -14,7 +14,7 @@
 > **Pre-release scaffold.** This crate ships its public API surface, docs and
 > probe infrastructure. The Superserver wire layer is **not implemented yet**:
 > `connect()` returns `Error::NotImplemented`, so nothing below runs against a
-> live server today. The protocol port is the next mission (see
+> live server today. The protocol port is planned work (see
 > [probes/](probes/)).
 
 `irisnative` aims to be a pure-Rust client for **InterSystems IRIS** that

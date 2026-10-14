@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Open TCP 1972 and observe the raw connection — do NOT authenticate.
 
-This is the first probe of the handshake mission. It performs the most
+This is the first probe of the planned protocol work. It performs the most
 passive experiment possible: make a TCP connection to the superserver
 (%Service_CP), read whatever the server sends unsolicited (IRIS is
 request-driven, so expect nothing until we send a request — that

@@ -55,13 +55,13 @@ anywhere beyond this compose pattern.
   objects). No clap, no MCP, no binaries — this repo ships a LIBRARY; tools
   consuming it live elsewhere.
 - `tests/` — `wire.rs` (today: pure-logic macro tests; byte-level codec
-  round-trips are the target and land with the probe mission, each quirk
+  round-trips are the target of the planned protocol work, each quirk
   pinned by a test citing the probe that discovered it) and `live.rs`
   (`#[ignore]`d live smoke — TCP reachability + graceful NotImplemented,
   env-driven, see Commands).
 - `probes/` — the Python/socket probe scripts the tests cite. A protocol
   claim without a probe file is not a claim. `handshake_dump.py` (passive
-  byte dump) exists; deeper probes land with the probe mission.
+  byte dump) exists; deeper probes land with the planned protocol work.
 - `examples/` — compile and run against compose, but stop at `connect()`
   with `NotImplemented` until the wire layer lands (globals walk, SQL,
   class-method / Embedded-Python call are the target).
