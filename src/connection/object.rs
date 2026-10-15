@@ -6,6 +6,18 @@ use super::commands::{build_class_method, build_class_method_void, build_method,
 use super::driver::{Transport, check_sysio, first_item};
 use super::session::Session;
 use crate::Result;
+use crate::wire::message::Reply;
+
+/// Decode a value-returning class/OREF method reply (sysio check then first
+/// item as text). Pure — shared by the sync and async drivers (A-6.2).
+///
+/// ref: go classes.go:ClassMethod / Method.
+pub fn decode_value_reply(reply: &Reply) -> Result<String> {
+    check_sysio(reply)?;
+    Ok(first_item(&reply.body)?
+        .map(|i| i.as_text())
+        .unwrap_or_default())
+}
 
 /// Invoke a class method and decode its result.
 ///
@@ -19,10 +31,7 @@ pub fn class_method<T: Transport>(
 ) -> Result<String> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_class_method(class, method, args, c), c)?;
-    check_sysio(&reply)?;
-    Ok(first_item(&reply.body)?
-        .map(|i| i.as_text())
-        .unwrap_or_default())
+    decode_value_reply(&reply)
 }
 
 /// Invoke a class method ignoring any result.
@@ -53,10 +62,7 @@ pub fn method<T: Transport>(
 ) -> Result<String> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_method(oref, name, args, void, c), c)?;
-    check_sysio(&reply)?;
-    Ok(first_item(&reply.body)?
-        .map(|i| i.as_text())
-        .unwrap_or_default())
+    decode_value_reply(&reply)
 }
 
 /// Read a property of an OREF.
@@ -70,10 +76,7 @@ pub fn property_get<T: Transport>(
 ) -> Result<String> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_property(oref, prop, None, c), c)?;
-    check_sysio(&reply)?;
-    Ok(first_item(&reply.body)?
-        .map(|i| i.as_text())
-        .unwrap_or_default())
+    decode_value_reply(&reply)
 }
 
 /// Write a property of an OREF.

@@ -18,6 +18,7 @@ use super::commands::{
 use super::driver::{Transport, check_sysio, first_item};
 use super::session::Session;
 use crate::wire::list::Item;
+use crate::wire::message::Reply;
 use crate::{Error, Result};
 
 /// Direction flags for the order command.
@@ -26,6 +27,19 @@ use crate::{Error, Result};
 pub const DIR_NEXT: i64 = 3;
 /// Previous direction flag.
 pub const DIR_PREV: i64 = 7;
+
+/// Decode a `GLOBAL_GET` reply: `None` for an undefined node (sysio code
+/// 1009 = `<UNDEFINED>`, py-iris `_IRIS.py:ERROR_UNDEFINED`), the node text
+/// otherwise. Pure — shared by the sync and async drivers (A-6.2).
+///
+/// ref: go globals.go:GlobalGet; py _IRIS.py:GlobalGet.
+pub fn decode_get_reply(reply: &Reply) -> Result<Option<String>> {
+    if reply.sysio_code() == ERROR_UNDEFINED {
+        return Ok(None);
+    }
+    check_sysio(reply)?;
+    Ok(first_item(&reply.body)?.map(|i| i.as_text()))
+}
 
 /// `GLOBAL_GET` 0xC241: value text, or `None` for an undefined node
 /// (sysio code 1009 = `<UNDEFINED>`, py-iris `_IRIS.py:ERROR_UNDEFINED`).
@@ -37,11 +51,7 @@ pub fn get<T: Transport>(
 ) -> Result<Option<String>> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_global_get(name, subs, c), c)?;
-    if reply.sysio_code() == ERROR_UNDEFINED {
-        return Ok(None);
-    }
-    check_sysio(&reply)?;
-    Ok(first_item(&reply.body)?.map(|i| i.as_text()))
+    decode_get_reply(&reply)
 }
 
 /// `GLOBAL_SET` 0xC242.

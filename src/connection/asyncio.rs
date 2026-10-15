@@ -19,10 +19,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream as TcpStreamAsync;
 
 use super::commands::{self, ConnectParams};
+use super::driver;
+use super::globals;
+use super::object;
 use super::session::Session;
 use super::sql::{self as sqlcmd, QueryState};
 use super::tx;
-use super::{driver, globals};
 use crate::wire::list::Item;
 use crate::wire::{message, message::Reply};
 use crate::{ConnectionOptions, Error, Result};
@@ -89,11 +91,7 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_global_get(name, subs, c), c)
             .await?;
-        if reply.sysio_code() == globals::ERROR_UNDEFINED {
-            return Ok(None);
-        }
-        driver::check_sysio(&reply)?;
-        Ok(driver::first_item(&reply.body)?.map(|i| i.as_text()))
+        globals::decode_get_reply(&reply)
     }
 
     /// `GLOBAL_SET` (0xC242).
@@ -134,10 +132,7 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_class_method(class, method, args, c), c)
             .await?;
-        driver::check_sysio(&reply)?;
-        Ok(driver::first_item(&reply.body)?
-            .map(|i| i.as_text())
-            .unwrap_or_default())
+        object::decode_value_reply(&reply)
     }
 
     /// Send `DQ` and read metadata + first data push (shared decoders).
