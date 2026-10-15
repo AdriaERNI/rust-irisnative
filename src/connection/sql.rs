@@ -163,17 +163,31 @@ pub fn error_text<T: Transport>(t: &mut T, s: &mut Session, sqlcode: i16) -> Res
         .unwrap_or_default())
 }
 
+/// SQLCODE ∈ {0, 100} continues; anything else is an error whose text the
+/// caller fetches via `OE`. Pure rule, shared by the sync and async drivers
+/// so the {0, 100} exception set lives in one place (A-6.2 / A-3.3).
+#[must_use]
+pub const fn sqlcode_is_ok(code: i16) -> bool {
+    code == 0 || code == 100
+}
+
+/// Build the `Error::Server` a failing SQLCODE maps to (A-3.3).
+#[must_use]
+pub fn sqlcode_error(code: i16, message: String) -> Error {
+    Error::Server {
+        code: i64::from(code),
+        message,
+    }
+}
+
 /// SQLCODE ∈ {0, 100} continues; anything else errors with the `OE`
 /// message (A-3.3).
 pub fn check_sqlcode<T: Transport>(t: &mut T, s: &mut Session, code: i16) -> Result<()> {
-    if code == 0 || code == 100 {
+    if sqlcode_is_ok(code) {
         return Ok(());
     }
     let message = error_text(t, s, code)?;
-    Err(Error::Server {
-        code: i64::from(code),
-        message,
-    })
+    Err(sqlcode_error(code, message))
 }
 
 /// Send `DQ` and read the metadata + first pushed data frame (sync driver).

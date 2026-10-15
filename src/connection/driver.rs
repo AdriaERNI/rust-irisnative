@@ -50,6 +50,18 @@ pub fn establish<T: Transport>(
     // HS (ledger rows 6-7)
     let c0 = session.next_count();
     let reply = t.roundtrip(&build_handshake(), c0)?;
+    apply_handshake(&reply, session)?;
+    // CN (ledger rows 8-9)
+    let c1 = session.next_count();
+    let reply = t.roundtrip(&build_connect(p, c1), c1)?;
+    apply_connect(&reply, session)
+}
+
+/// Decode an `HS` reply into `session` — pure, shared by the sync and async
+/// drivers so the negotiation rules live in exactly one place (A-6.2).
+///
+/// ref: go-irisnative src/connection/mod.go:handshake.
+pub fn apply_handshake(reply: &Reply, session: &mut Session) -> Result<()> {
     if reply.status() != 0 {
         return Err(Error::Server {
             code: i64::from(reply.status()),
@@ -81,10 +93,14 @@ pub fn establish<T: Transport>(
     // ref: py-iris iris/_IRISConnection.py:_connect
     session.info.compact_double = proto >= 65 && feature_bits & 2 > 0;
     session.info.locale = super::session::item_text(&locale_item);
+    Ok(())
+}
 
-    // CN (ledger rows 8-9)
-    let c1 = session.next_count();
-    let reply = t.roundtrip(&build_connect(p, c1), c1)?;
+/// Decode a `CN` reply into `session` — pure, shared by the sync and async
+/// drivers (A-6.2). Status 417 is Access Denied → [`Error::Auth`].
+///
+/// ref: go-irisnative src/connection/mod.go:connect.
+pub fn apply_connect(reply: &Reply, session: &mut Session) -> Result<()> {
     match reply.status() {
         0 => {}
         417 => return Err(Error::Auth), // Access Denied

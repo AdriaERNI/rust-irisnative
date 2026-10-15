@@ -11,7 +11,23 @@ use super::commands::{build_commit, build_rollback};
 use super::driver::Transport;
 use super::session::Session;
 use super::sql::direct_update;
+use crate::wire::message::Reply;
 use crate::{Error, Result};
+
+/// Pure `TC`/`TR` reply check shared by the sync and async drivers: the
+/// reply counts as success when either the raw status word or the
+/// sysio-decoded word is 0 (A-6.2 — one place, both drivers).
+///
+/// ref: go-irisnative src/connection/mod.go:Commit / Rollback.
+pub fn check_tx_reply(reply: &Reply) -> Result<()> {
+    if reply.status() != 0 && reply.sysio_code() != 0 {
+        return Err(Error::Server {
+            code: i64::from(reply.status()),
+            message: super::session::first_text(&reply.body).unwrap_or_default(),
+        });
+    }
+    Ok(())
+}
 
 /// Begin a transaction; a second begin on an open transaction is refused
 /// client-side the way go's `errMultipleTx` refuses it.
@@ -39,12 +55,7 @@ pub fn begin<T: Transport>(t: &mut T, s: &mut Session, open: &mut bool) -> Resul
 pub fn commit<T: Transport>(t: &mut T, s: &mut Session, open: &mut bool) -> Result<()> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_commit(c), c)?;
-    if reply.status() != 0 && reply.sysio_code() != 0 {
-        return Err(Error::Server {
-            code: i64::from(reply.status()),
-            message: super::session::first_text(&reply.body).unwrap_or_default(),
-        });
-    }
+    check_tx_reply(&reply)?;
     *open = false;
     Ok(())
 }
@@ -55,12 +66,7 @@ pub fn commit<T: Transport>(t: &mut T, s: &mut Session, open: &mut bool) -> Resu
 pub fn rollback<T: Transport>(t: &mut T, s: &mut Session, open: &mut bool) -> Result<()> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_rollback(c), c)?;
-    if reply.status() != 0 && reply.sysio_code() != 0 {
-        return Err(Error::Server {
-            code: i64::from(reply.status()),
-            message: super::session::first_text(&reply.body).unwrap_or_default(),
-        });
-    }
+    check_tx_reply(&reply)?;
     *open = false;
     Ok(())
 }

@@ -19,10 +19,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream as TcpStreamAsync;
 
 use super::commands::{self, ConnectParams};
-use super::session::{Session, first_text};
+use super::session::Session;
 use super::sql::{self as sqlcmd, QueryState};
-use super::{MIN_PROTOCOL, globals};
-use crate::wire::list::{Item, ListReader};
+use super::tx;
+use super::{driver, globals};
+use crate::wire::list::Item;
 use crate::wire::message::Reply;
 use crate::{ConnectionOptions, Error, Result};
 
@@ -91,8 +92,8 @@ impl Connection {
         if reply.sysio_code() == globals::ERROR_UNDEFINED {
             return Ok(None);
         }
-        super::driver::check_sysio(&reply)?;
-        first_item_text(&reply.body)
+        driver::check_sysio(&reply)?;
+        Ok(driver::first_item(&reply.body)?.map(|i| i.as_text()))
     }
 
     /// `GLOBAL_SET` (0xC242).
@@ -104,7 +105,7 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_global_set(name, subs, value, c), c)
             .await?;
-        super::driver::check_sysio(&reply)
+        driver::check_sysio(&reply)
     }
 
     /// `GLOBAL_KILL` (0xC243).
@@ -116,7 +117,7 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_global_kill(name, subs, c), c)
             .await?;
-        super::driver::check_sysio(&reply)
+        driver::check_sysio(&reply)
     }
 
     /// `CLASSMETHOD_VALUE` (0xC24B).
@@ -133,8 +134,10 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_class_method(class, method, args, c), c)
             .await?;
-        super::driver::check_sysio(&reply)?;
-        Ok(first_item_text(&reply.body)?.unwrap_or_default())
+        driver::check_sysio(&reply)?;
+        Ok(driver::first_item(&reply.body)?
+            .map(|i| i.as_text())
+            .unwrap_or_default())
     }
 
     /// Send `DQ` and read metadata + first data push (shared decoders).
@@ -151,11 +154,17 @@ impl Connection {
             )
             .await?;
         let code = i16::try_from(reply.status()).unwrap_or(i16::MAX);
-        check_sqlcode_async(self, code).await?;
+        if !sqlcmd::sqlcode_is_ok(code) {
+            let message = self.error_text(code).await?;
+            return Err(sqlcmd::sqlcode_error(code, message));
+        }
         let meta = sqlcmd::decode_meta(&reply.body);
         let reply = self.read_push(c).await?;
         let sqlcode = i16::try_from(reply.status()).unwrap_or(i16::MAX);
-        check_sqlcode_async(self, sqlcode).await?;
+        if !sqlcmd::sqlcode_is_ok(sqlcode) {
+            let message = self.error_text(sqlcode).await?;
+            return Err(sqlcmd::sqlcode_error(sqlcode, message));
+        }
         Ok(QueryState {
             statement_id,
             columns: meta.columns,
@@ -173,7 +182,7 @@ impl Connection {
     /// Transport/server failures.
     pub async fn next_row(&mut self, st: &mut QueryState) -> Result<Option<Vec<Item>>> {
         loop {
-            if st.sqlcode != 0 && st.sqlcode != 100 {
+            if !sqlcmd::sqlcode_is_ok(st.sqlcode) {
                 return Ok(None);
             }
             if let Some(row) = sqlcmd::decode_row(st)? {
@@ -187,12 +196,9 @@ impl Connection {
                 .roundtrip(&commands::build_fetch(st.statement_id, c), c)
                 .await?;
             st.sqlcode = i16::try_from(reply.status()).unwrap_or(i16::MAX);
-            if st.sqlcode != 0 && st.sqlcode != 100 {
+            if !sqlcmd::sqlcode_is_ok(st.sqlcode) {
                 let message = self.error_text(st.sqlcode).await?;
-                return Err(Error::Server {
-                    code: i64::from(st.sqlcode),
-                    message,
-                });
+                return Err(sqlcmd::sqlcode_error(st.sqlcode, message));
             }
             st.data = reply.body;
             st.offset = 0;
@@ -213,7 +219,10 @@ impl Connection {
             )
             .await?;
         let code = i16::try_from(reply.status()).unwrap_or(i16::MAX);
-        check_sqlcode_async(self, code).await?;
+        if !sqlcmd::sqlcode_is_ok(code) {
+            let message = self.error_text(code).await?;
+            return Err(sqlcmd::sqlcode_error(code, message));
+        }
         Ok(sqlcmd::decode_du_affected(&reply.body))
     }
 
@@ -223,7 +232,9 @@ impl Connection {
         let reply = self
             .roundtrip(&commands::build_error_info(sqlcode, c), c)
             .await?;
-        Ok(first_item_text(&reply.body)?.unwrap_or_default())
+        Ok(driver::first_item(&reply.body)?
+            .map(|i| i.as_text())
+            .unwrap_or_default())
     }
 
     /// `TC` commit.
@@ -233,12 +244,7 @@ impl Connection {
     pub async fn commit(&mut self) -> Result<()> {
         let c = self.session.next_count();
         let reply = self.roundtrip(&commands::build_commit(c), c).await?;
-        if reply.status() != 0 && reply.sysio_code() != 0 {
-            return Err(Error::Server {
-                code: i64::from(reply.status()),
-                message: first_text(&reply.body).unwrap_or_default(),
-            });
-        }
+        tx::check_tx_reply(&reply)?;
         self.tx_open = false;
         Ok(())
     }
@@ -250,12 +256,7 @@ impl Connection {
     pub async fn rollback(&mut self) -> Result<()> {
         let c = self.session.next_count();
         let reply = self.roundtrip(&commands::build_rollback(c), c).await?;
-        if reply.status() != 0 && reply.sysio_code() != 0 {
-            return Err(Error::Server {
-                code: i64::from(reply.status()),
-                message: first_text(&reply.body).unwrap_or_default(),
-            });
-        }
+        tx::check_tx_reply(&reply)?;
         self.tx_open = false;
         Ok(())
     }
@@ -324,82 +325,20 @@ async fn read_exact_async<S: AsyncReadExt + Unpin>(s: &mut S, buf: &mut [u8]) ->
     Ok(())
 }
 
-fn first_item_text(body: &[u8]) -> Result<Option<String>> {
-    match ListReader::new(body).next() {
-        Some(Ok(item)) => Ok(Some(item.as_text())),
-        Some(Err(e)) => Err(Error::Protocol(e.to_string())),
-        None => Ok(None),
-    }
-}
-
-/// Handshake + connect over an async transport, filling `session` with the
-/// same step sequence as the sync `establish`.
+/// Handshake + connect over an async transport. The reply *decoding* is the
+/// shared pure seam in [`driver`] — this function only sequences IO, so the
+/// negotiation rules cannot drift from the sync path (A-6.2).
 async fn establish_async(
     stream: &mut BufStream<TcpStreamAsync>,
     session: &mut Session,
     p: &ConnectParams<'_>,
 ) -> Result<()> {
-    // HS
     let c0 = session.next_count();
     let reply = roundtrip_stream(stream, &commands::build_handshake(), c0).await?;
-    if reply.status() != 0 {
-        return Err(Error::Server {
-            code: i64::from(reply.status()),
-            message: first_text(&reply.body).unwrap_or_default(),
-        });
-    }
-    let proto = read_u16_at(&reply.body, 0)?;
-    if proto < MIN_PROTOCOL {
-        return Err(Error::Protocol(format!(
-            "server protocol {proto} is below the minimum supported {MIN_PROTOCOL}"
-        )));
-    }
-    let feature_bits = read_u16_at(&reply.body, 2)?;
-    let locale = ListReader::new(reply.body.get(4..).unwrap_or(&[]))
-        .next()
-        .and_then(std::result::Result::ok)
-        .map(|i| i.as_text())
-        .ok_or_else(|| Error::Protocol("HS reply missing locale".into()))?;
-    session.info.protocol = proto;
-    session.info.unicode = feature_bits & 1 > 0;
-    session.info.compact_double = proto >= 65 && feature_bits & 2 > 0;
-    session.info.locale = locale;
-
-    // CN
+    driver::apply_handshake(&reply, session)?;
     let c1 = session.next_count();
     let reply = roundtrip_stream(stream, &commands::build_connect(p, c1), c1).await?;
-    match reply.status() {
-        0 => {}
-        417 => return Err(Error::Auth),
-        s => {
-            return Err(Error::Server {
-                code: i64::from(s),
-                message: first_text(&reply.body).unwrap_or_default(),
-            });
-        }
-    }
-    // connect reply order (go mod.go:connect): info, delimited-ids, ignored,
-    // isolation level, server job number, sql empty string, server features.
-    let mut r = ListReader::new(&reply.body);
-    session.info.info = r
-        .next()
-        .and_then(std::result::Result::ok)
-        .map(|i| i.as_text())
-        .unwrap_or_default();
-    for _ in 0..3 {
-        let _ = r.next();
-    }
-    session.info.server_job = r
-        .next()
-        .and_then(std::result::Result::ok)
-        .map(|i| i.as_text())
-        .unwrap_or_default();
-    let _ = r.next(); // sql empty-string convention
-    session.info.feature_options = match r.next().and_then(std::result::Result::ok) {
-        Some(Item::Int(v)) => u32::try_from(v).unwrap_or(0),
-        _ => 0,
-    };
-    Ok(())
+    driver::apply_connect(&reply, session)
 }
 
 async fn roundtrip_stream(
@@ -453,23 +392,4 @@ async fn read_reply_async(
         more = nh.is_continuation();
     }
     Ok(Reply { header, body })
-}
-
-/// Async twin of `sql::check_sqlcode` (same rule, OE fetch awaited).
-async fn check_sqlcode_async(conn: &mut Connection, code: i16) -> Result<()> {
-    if code == 0 || code == 100 {
-        return Ok(());
-    }
-    let message = conn.error_text(code).await?;
-    Err(Error::Server {
-        code: i64::from(code),
-        message,
-    })
-}
-
-fn read_u16_at(body: &[u8], off: usize) -> Result<u16> {
-    let pair = body
-        .get(off..off + 2)
-        .ok_or_else(|| Error::Protocol("HS reply truncated".into()))?;
-    Ok(u16::from_le_bytes([pair[0], pair[1]]))
 }
