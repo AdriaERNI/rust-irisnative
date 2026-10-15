@@ -1,4 +1,4 @@
-//! Tokio-backed connection variant (feature `async`; ledger row 33).
+//! Tokio-backed connection variant (feature `async`).
 //!
 //! Every wire fact comes from the shared `wire/` codecs and
 //! `connection::commands` builders — this module contains IO sequencing
@@ -290,7 +290,7 @@ impl Drop for Connection {
     /// Best-effort `DC` before the socket closes. `Drop` cannot await, so
     /// the frame goes into the `BufStream` buffer (`write` under a runtime
     /// context) and out with the stream flush at buffer teardown — the
-    /// sync path is the authoritative disconnect (ledger row 11).
+    /// sync path is the authoritative disconnect.
     fn drop(&mut self) {
         let count = self.session.next_count();
         let frame = commands::build_disconnect(count);
@@ -322,7 +322,7 @@ async fn read_exact_async<S: AsyncReadExt + Unpin>(s: &mut S, buf: &mut [u8]) ->
 
 /// Handshake + connect over an async transport. The reply *decoding* is the
 /// shared pure seam in [`driver`] — this function only sequences IO, so the
-/// negotiation rules cannot drift from the sync path (A-6.2).
+/// negotiation rules cannot drift from the sync path.
 async fn establish_async(
     stream: &mut BufStream<TcpStreamAsync>,
     session: &mut Session,
@@ -352,7 +352,7 @@ async fn read_reply_async<S: AsyncReadExt + Unpin>(
 ) -> Result<Reply> {
     // Same sequence as wire::message::read_reply (count echo -> bounded
     // alloc -> continuation coalesce); only the `read` is async, so the
-    // framing policy stays in `wire` (ledger rows 12/34, A-6.2).
+    // framing policy stays in `wire`.
     let mut head = [0u8; crate::wire::header::HEADER_SIZE];
     read_exact_async(s, &mut head).await?;
     let header = crate::wire::header::Header::parse(&head);

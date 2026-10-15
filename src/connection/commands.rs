@@ -1,9 +1,8 @@
-//! Pure request builders for every command family (ledger rows 6–9, 11,
-//! 13–17, 18–20, 23, 25–27, 30–31).
+//! Pure request builders for every command family.
 //!
 //! Each `build_*` returns the exact wire bytes for a given logical
 //! operation, so golden-frame tests and the async fixture test can compare
-//! sync/async outputs byte-for-byte (acceptance A-6.2).
+//! sync/async outputs byte-for-byte.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -82,7 +81,7 @@ pub fn build_connect(p: &ConnectParams<'_>, count: u32) -> Vec<u8> {
     m.dump(count)
 }
 
-/// `DC` disconnect (ledger row 11: sent from Drop, best effort).
+/// `DC` disconnect (sent from Drop, best effort).
 ///
 /// ref: go-irisnative src/connection/mod.go:Disconnect.
 #[must_use]

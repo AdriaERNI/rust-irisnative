@@ -1,7 +1,7 @@
 //! Shared IO driver logic: given a socket-like transport, run commands.
 //!
 //! Kept transport-generic so the `async` feature can drive the *same* code
-//! with a tokio socket (acceptance A-6.2 — async wraps IO, never forks the
+//! with a tokio socket (async wraps IO, never forks the
 //! codec or the command sequence).
 //!
 //! ref: go-irisnative src/connection/mod.go (message send/read loop).
@@ -47,18 +47,18 @@ pub fn establish<T: Transport>(
     session: &mut Session,
     p: &ConnectParams<'_>,
 ) -> Result<()> {
-    // HS (ledger rows 6-7)
+    // HS
     let c0 = session.next_count();
     let reply = t.roundtrip(&build_handshake(), c0)?;
     apply_handshake(&reply, session)?;
-    // CN (ledger rows 8-9)
+    // CN
     let c1 = session.next_count();
     let reply = t.roundtrip(&build_connect(p, c1), c1)?;
     apply_connect(&reply, session)
 }
 
 /// Decode an `HS` reply into `session` — pure, shared by the sync and async
-/// drivers so the negotiation rules live in exactly one place (A-6.2).
+/// drivers so the negotiation rules live in exactly one place.
 ///
 /// ref: go-irisnative src/connection/mod.go:handshake.
 pub fn apply_handshake(reply: &Reply, session: &mut Session) -> Result<()> {
@@ -97,7 +97,7 @@ pub fn apply_handshake(reply: &Reply, session: &mut Session) -> Result<()> {
 }
 
 /// Decode a `CN` reply into `session` — pure, shared by the sync and async
-/// drivers (A-6.2). Status 417 is Access Denied → [`Error::Auth`].
+/// drivers. Status 417 is Access Denied → [`Error::Auth`].
 ///
 /// ref: go-irisnative src/connection/mod.go:connect.
 pub fn apply_connect(reply: &Reply, session: &mut Session) -> Result<()> {
@@ -147,7 +147,7 @@ pub fn map_frame_err(e: crate::wire::message::FrameError) -> Error {
 
 /// sysio replies: 0 is success; any other code maps to `Error::Server`
 /// with the trailing message when present (`<UNDEFINED>` is the notable
-/// one — surfaced as `Error::Server` per A-2.1).
+/// one — surfaced as `Error::Server`.
 pub fn check_sysio(reply: &Reply) -> Result<()> {
     let code = reply.sysio_code();
     if code == 0 {

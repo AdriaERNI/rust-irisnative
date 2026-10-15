@@ -1,4 +1,4 @@
-//! `%List` item codec (ledger rows 3 and 4).
+//! `%List` item codec.
 //!
 //! Item framing (both references agree): a size/type prefix followed by the
 //! payload. `prefix = payload_len + 2` and type byte for payloads under 253

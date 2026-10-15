@@ -1,5 +1,4 @@
-//! Message framing: build request frames, read reply frames (ledger rows 2,
-//! 11, 18, 34).
+//! Message framing: build request frames, read reply frames.
 //!
 //! ref: go-irisnative src/connection/message.go:ReadMessage / Message.Dump
 
@@ -20,7 +19,7 @@ use super::list::{ListWriter, write_sql_text};
 
 /// Upper bound for a single frame body before it is allocated. The
 /// references allocate `length` bytes unchecked (go message.go:ReadMessage —
-/// documented divergence, ledger row 34); a hostile 4 GiB header must not
+/// documented divergence); a hostile 4 GiB header must not
 /// turn into an allocation attempt.
 ///
 /// IRIS never sends SQL data frames this large in practice: reply bodies
@@ -106,7 +105,7 @@ pub fn read_reply<R: Read>(reader: &mut R, expect_count: Option<u32>) -> Result<
 
 /// The echoed-count check every reply header must pass before its body is
 /// touched. Shared by the sync reader here and the async driver so the
-/// desync rule has exactly one definition (ledger row 12).
+/// desync rule has exactly one definition.
 ///
 /// ref: py-iris _`InStream` raises "Invalid Message Count" on echo mismatch.
 ///

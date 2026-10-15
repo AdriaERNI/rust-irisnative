@@ -2,7 +2,7 @@
 //!
 //! The command request builders are pure functions shared by the sync and
 //! async IO drivers, so the `async` feature wraps IO only and never forks
-//! protocol logic (ledger row 33, acceptance A-6.2).
+//! protocol logic.
 
 pub mod auth;
 pub mod commands;

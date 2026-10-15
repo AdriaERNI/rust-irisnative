@@ -7,11 +7,12 @@
 //! `IRISPASSWORD`=SYS, `IRISNS`=USER. On shared hosts the container may
 //! map a different host port (our dev box uses 19720).
 //!
-//! Parity layer (acceptance A-8 / mission requirement "go/py comparison"):
+//! Parity layer:
 //! `parity_matches_reference_scenario` runs the SAME end-to-end scenario
 //! twice — once through this crate, once through `probes/parity_scenario.py`
 //! (the stdlib re-implementation of go-irisnative's wire rules; the pure-
-//! Python wheel in `.sf-local/ref/py-iris` speaks protocol 65 and is denied
+//! Python wheel in intersystems-community/iris-driver-distribution
+//! speaks protocol 65 and is denied
 //! by 2025.3 — the version trap, probed 2026-10-15) — and asserts equal
 //! outcomes value-for-value, SQLCODE-for-SQLCODE.
 
@@ -276,7 +277,7 @@ fn globals_roundtrip_walk_and_definedness() {
 #[test]
 #[ignore = "needs a live IRIS"]
 fn undefined_global_is_server_error() {
-    // A-2.1: <UNDEFINED> surfaces as Error::Server with code -1009
+    // <UNDEFINED> surfaces as Error::Server with code -1009
     // (1009 is $ZOS status 11.9.1 -> the port normalizes the sign).
     let mut conn = connected();
     conn.kill(&global!(SFPU(1))).ok();
@@ -422,7 +423,7 @@ fn class_method_invocation_round_trips() {
 #[test]
 #[ignore = "needs a live IRIS"]
 fn oref_method_and_property_round_trip() {
-    // ledger rows 26/27: OREF instance methods + property get/set
+    // OREF instance methods + property get/set
     // (go classes.go METHOD_VALUE / PROPERTY, py _IRISObject.py). The
     // `%Net.HttpRequest` property accessors are generated instance
     // methods, so AcceptGzipGet proves the OREF really dispatched; the
@@ -456,7 +457,7 @@ fn oref_method_and_property_round_trip() {
 #[test]
 #[ignore = "needs a live IRIS"]
 fn dropping_the_connection_disconnects_the_server_job() {
-    // Hygiene A-7.1: Drop sends DC; the server job must go away. Verified
+    // Hygiene: Drop sends DC; the server job must go away. Verified
     // through %SYS.ProcessQuery on a second connection (the JobNumber field
     // of the USER job is its Pid — probe 2026-10-15).
     let mut watcher = connect(
@@ -742,7 +743,7 @@ fn values_agree(a: &json::Val, b: &json::Val) -> bool {
 #[tokio::test]
 #[ignore = "needs a live IRIS"]
 async fn async_connection_drives_the_same_wire() {
-    // A-6.2/A-6.3: the async variant shares codecs and builders; behavior
+    // the async variant shares codecs and builders; behavior
     // must match the sync path on the same server.
     let mut conn = irisnative::r#async::Connection::connect(options())
         .await

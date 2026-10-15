@@ -1,4 +1,4 @@
-//! Global (M) commands (ledger rows 13–17).
+//! Global (M) commands.
 //!
 //! ref: go-irisnative src/connection/globals.go.
 
@@ -30,7 +30,7 @@ pub const DIR_PREV: i64 = 7;
 
 /// Decode a `GLOBAL_GET` reply: `None` for an undefined node (sysio code
 /// 1009 = `<UNDEFINED>`, py-iris `_IRIS.py:ERROR_UNDEFINED`), the node text
-/// otherwise. Pure — shared by the sync and async drivers (A-6.2).
+/// otherwise. Pure — shared by the sync and async drivers.
 ///
 /// ref: go globals.go:GlobalGet; py _IRIS.py:GlobalGet.
 pub fn decode_get_reply(reply: &Reply) -> Result<Option<String>> {

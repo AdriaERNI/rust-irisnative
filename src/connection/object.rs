@@ -1,4 +1,4 @@
-//! Class-method and OREF commands (ledger rows 25–28).
+//! Class-method and OREF commands.
 //!
 //! ref: go-irisnative src/connection/classes.go.
 
@@ -9,7 +9,7 @@ use crate::Result;
 use crate::wire::message::Reply;
 
 /// Decode a value-returning class/OREF method reply (sysio check then first
-/// item as text). Pure — shared by the sync and async drivers (A-6.2).
+/// item as text). Pure — shared by the sync and async drivers.
 ///
 /// ref: go classes.go:ClassMethod / Method.
 pub fn decode_value_reply(reply: &Reply) -> Result<String> {

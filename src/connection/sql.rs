@@ -1,7 +1,7 @@
-//! SQL commands: DQ/DU/FD/OE (ledger rows 18–24).
+//! SQL commands: DQ/DU/FD/OE.
 //!
 //! Parsing lives in the pure `decode_*` helpers below so the sync and async
-//! drivers share one source of truth (acceptance A-6.2).
+//! drivers share one source of truth.
 //!
 //! ref: go-irisnative src/connection/sql.go (`DirectQuery`, `DirectUpdate`,
 //! getColumns, fetchMoreData) and rows.go (Next).
@@ -165,13 +165,13 @@ pub fn error_text<T: Transport>(t: &mut T, s: &mut Session, sqlcode: i16) -> Res
 
 /// SQLCODE ∈ {0, 100} continues; anything else is an error whose text the
 /// caller fetches via `OE`. Pure rule, shared by the sync and async drivers
-/// so the {0, 100} exception set lives in one place (A-6.2 / A-3.3).
+/// so the {0, 100} exception set lives in one place.
 #[must_use]
 pub const fn sqlcode_is_ok(code: i16) -> bool {
     code == 0 || code == 100
 }
 
-/// Build the `Error::Server` a failing SQLCODE maps to (A-3.3).
+/// Build the `Error::Server` a failing SQLCODE maps to.
 #[must_use]
 pub fn sqlcode_error(code: i16, message: String) -> Error {
     Error::Server {
@@ -181,7 +181,7 @@ pub fn sqlcode_error(code: i16, message: String) -> Error {
 }
 
 /// SQLCODE ∈ {0, 100} continues; anything else errors with the `OE`
-/// message (A-3.3).
+/// message.
 pub fn check_sqlcode<T: Transport>(t: &mut T, s: &mut Session, code: i16) -> Result<()> {
     if sqlcode_is_ok(code) {
         return Ok(());

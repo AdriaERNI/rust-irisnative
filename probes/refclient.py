@@ -2,8 +2,8 @@
 """Minimal reference client speaking the Superserver protocol per go-irisnative.
 
 This is the capture harness for the golden-frame tests: it implements the
-wire rules of `.sf-local/ref/go-irisnative/src/` (protocol 69) with pure
-stdlib Python, and every exchange it performs can be logged frame-by-frame
+wire rules of go-irisnative (github.com/caretdev/go-irisnative,
+protocol 69) with pure stdlib Python, and every exchange it performs can be logged frame-by-frame
 (`log_frames=True`) for replay in `tests/golden.rs`. It is a probe tool, not
 production code — error handling is deliberately thin.
 

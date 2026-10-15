@@ -1,7 +1,7 @@
 //! Session state shared by the sync and async IO drivers.
 //!
 //! The drivers below both keep: a message counter incremented once per
-//! send (ledger row 12), a statement-id counter, and the negotiated
+//! send, a statement-id counter, and the negotiated
 //! connection facts. Counter semantics: **go parity (+1)** — py's `+2`
 //! sequence is irrelevant because the server only echoes our count back
 //! (live-confirmed in `probes/captures/connect_globals.json`).
@@ -37,7 +37,7 @@ pub struct ConnectionInfo {
     pub info: String,
     /// Server job number.
     pub server_job: String,
-    /// Server-negotiated featureOptions — governs gating (ledger row 32).
+    /// Server-negotiated featureOptions — governs gating.
     pub feature_options: u32,
 }
 

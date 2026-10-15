@@ -296,7 +296,7 @@ impl Connection {
     ///
     /// # Errors
     /// [`Error::Server`] (code 1009, `<UNDEFINED>`) when the node is
-    /// undefined (acceptance A-2.1 documents this behavior).
+    /// undefined (this is deliberate behavior, matching the drivers).
     pub fn get<T: crate::value::Value>(&mut self, node: &Global) -> Result<T> {
         let raw = globals::get(
             &mut self.stream,

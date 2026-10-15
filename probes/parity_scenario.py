@@ -4,8 +4,9 @@
 The scenario mirrors `tests/protocol.rs::live_parity_vs_reference`: the Rust
 client and this script must report IDENTICAL outcomes (values, SQLCODE
 behavior, rows affected) against the same IRIS server. Reference rules come
-from go-irisnative (.sf-local/ref/go-irisnative/src/connection/*.go); the
-pure-Python wheel in .sf-local/ref/py-iris speaks protocol 65 and is denied
+from github.com/caretdev/go-irisnative (src/connection/*.go); the
+pure-Python wheel in intersystems-community/iris-driver-distribution
+speaks protocol 65 and is denied
 by modern servers (version trap — probed 2026-10-15), so the Go wire
 semantics via refclient.py are the parity oracle.
 

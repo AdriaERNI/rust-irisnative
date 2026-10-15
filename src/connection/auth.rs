@@ -1,4 +1,4 @@
-//! Credential obfuscation and OS-user discovery (ledger rows 5 and 10).
+//! Credential obfuscation and OS-user discovery.
 //!
 //! Truth note (probe-settled, 2026-10-15, `probes/refclient.py` against IRIS
 //! 2025.3 protocol 69): the connect path uses a *positional rotate cipher*,

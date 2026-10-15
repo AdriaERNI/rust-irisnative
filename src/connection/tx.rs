@@ -1,4 +1,4 @@
-//! Transactions (ledger rows 30–32).
+//! Transactions.
 //!
 //! ref: go-irisnative src/connection/mod.go:BeginTx / Commit / Rollback and
 //! src/connection/transaction.go.
@@ -16,7 +16,7 @@ use crate::{Error, Result};
 
 /// Pure `TC`/`TR` reply check shared by the sync and async drivers: the
 /// reply counts as success when either the raw status word or the
-/// sysio-decoded word is 0 (A-6.2 — one place, both drivers).
+/// sysio-decoded word is 0 (one place, both drivers).
 ///
 /// ref: go-irisnative src/connection/mod.go:Commit / Rollback.
 pub fn check_tx_reply(reply: &Reply) -> Result<()> {

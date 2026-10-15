@@ -1,4 +1,4 @@
-//! 14-byte message header (ledger row 1).
+//! 14-byte message header.
 //!
 //! ref: go-irisnative `src/connection/message_header.go:NewMessageHeader` /
 //! `SetLength` / `SetCount` / `SetStatementId` — little-endian u32 fields at
