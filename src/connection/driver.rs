@@ -131,7 +131,10 @@ pub fn apply_connect(reply: &Reply, session: &mut Session) -> Result<()> {
     Ok(())
 }
 
-fn map_frame_err(e: crate::wire::message::FrameError) -> Error {
+/// Maps a framing failure to the crate error type — one place, both
+/// drivers (the async reader reuses the `wire` framing policy).
+#[must_use]
+pub fn map_frame_err(e: crate::wire::message::FrameError) -> Error {
     use crate::wire::message::FrameError;
     match e {
         FrameError::Io(e) => Error::Io(e),

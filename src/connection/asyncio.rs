@@ -24,7 +24,7 @@ use super::sql::{self as sqlcmd, QueryState};
 use super::tx;
 use super::{driver, globals};
 use crate::wire::list::Item;
-use crate::wire::message::Reply;
+use crate::wire::{message, message::Reply};
 use crate::{ConnectionOptions, Error, Result};
 
 /// Async transport state: buffered tokio socket + the same session struct
@@ -351,42 +351,30 @@ async fn roundtrip_stream(
     read_reply_async(stream, Some(count)).await
 }
 
-async fn read_reply_async(
-    stream: &mut BufStream<TcpStreamAsync>,
+async fn read_reply_async<S: AsyncReadExt + Unpin>(
+    s: &mut S,
     expect_count: Option<u32>,
 ) -> Result<Reply> {
+    // Same sequence as wire::message::read_reply (count echo -> bounded
+    // alloc -> continuation coalesce); only the `read` is async, so the
+    // framing policy stays in `wire` (ledger rows 12/34, A-6.2).
     let mut head = [0u8; crate::wire::header::HEADER_SIZE];
-    read_exact_async(stream, &mut head).await?;
+    read_exact_async(s, &mut head).await?;
     let header = crate::wire::header::Header::parse(&head);
-    if let Some(want) = expect_count {
-        if header.count != want {
-            return Err(Error::Protocol(format!(
-                "message count desync: expected {want}, got {}",
-                header.count
-            )));
-        }
-    }
-    if header.length > crate::wire::message::MAX_FRAME_BODY {
-        return Err(Error::Protocol("frame exceeds safety bound".into()));
-    }
-    let mut body = vec![0u8; header.length as usize];
+    message::check_reply_count(&header, expect_count).map_err(driver::map_frame_err)?;
+    let mut body = message::body_with_bound(header.length).map_err(driver::map_frame_err)?;
     if header.length > 0 {
-        read_exact_async(stream, &mut body).await?;
+        read_exact_async(s, &mut body).await?;
     }
     let mut more = header.is_continuation();
     while more {
         let mut next_head = [0u8; crate::wire::header::HEADER_SIZE];
-        read_exact_async(stream, &mut next_head).await?;
+        read_exact_async(s, &mut next_head).await?;
         let nh = crate::wire::header::Header::parse(&next_head);
-        if nh.length > crate::wire::message::MAX_FRAME_BODY {
-            return Err(Error::Protocol("frame exceeds safety bound".into()));
-        }
-        let mut chunk = vec![0u8; nh.length as usize];
+        message::check_total_bound(body.len(), nh.length).map_err(driver::map_frame_err)?;
+        let mut chunk = message::body_with_bound(nh.length).map_err(driver::map_frame_err)?;
         if nh.length > 0 {
-            read_exact_async(stream, &mut chunk).await?;
-        }
-        if body.len() + chunk.len() > crate::wire::message::MAX_TOTAL_BODY {
-            return Err(Error::Protocol("coalesced body exceeds bound".into()));
+            read_exact_async(s, &mut chunk).await?;
         }
         body.extend_from_slice(&chunk);
         more = nh.is_continuation();

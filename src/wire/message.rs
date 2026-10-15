@@ -85,7 +85,7 @@ pub fn encode_frame(
 pub fn read_reply<R: Read>(reader: &mut R, expect_count: Option<u32>) -> Result<Reply, FrameError> {
     let mut head = [0u8; HEADER_SIZE];
     let header = read_one(reader, &mut head, expect_count)?;
-    let mut body = checked_body(header.length)?;
+    let mut body = body_with_bound(header.length)?;
     reader.read_exact(&mut body).map_err(FrameError::Io)?;
     // Continuation chunks each carry the high bit in their own header; keep
     // reading until a chunk arrives without it (py-iris
@@ -95,19 +95,45 @@ pub fn read_reply<R: Read>(reader: &mut R, expect_count: Option<u32>) -> Result<
         let mut next_head = [0u8; HEADER_SIZE];
         reader.read_exact(&mut next_head).map_err(FrameError::Io)?;
         let nh = Header::parse(&next_head);
-        if body
-            .len()
-            .saturating_add(usize::try_from(nh.length).unwrap_or(usize::MAX))
-            > MAX_TOTAL_BODY
-        {
-            return Err(FrameError::Oversized);
-        }
+        check_total_bound(body.len(), nh.length)?;
         let mut chunk = checked_body(nh.length)?;
         reader.read_exact(&mut chunk).map_err(FrameError::Io)?;
         body.extend_from_slice(&chunk);
         more = nh.is_continuation();
     }
     Ok(Reply { header, body })
+}
+
+/// The echoed-count check every reply header must pass before its body is
+/// touched. Shared by the sync reader here and the async driver so the
+/// desync rule has exactly one definition (ledger row 12).
+///
+/// ref: py-iris _`InStream` raises "Invalid Message Count" on echo mismatch.
+///
+/// # Errors
+/// [`FrameError::Desync`] when `expect_count` differs from the echo.
+pub fn check_reply_count(header: &Header, expect_count: Option<u32>) -> Result<(), FrameError> {
+    if let Some(want) = expect_count {
+        if header.count != want {
+            return Err(FrameError::Desync {
+                want,
+                got: header.count,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject a coalesced continuation whose combined size would exceed
+/// [`MAX_TOTAL_BODY`] before anything is allocated for it.
+///
+/// # Errors
+/// [`FrameError::Oversized`] when `body_len + next_len` exceeds the bound.
+pub fn check_total_bound(body_len: usize, next_len: u32) -> Result<(), FrameError> {
+    if body_len.saturating_add(usize::try_from(next_len).unwrap_or(usize::MAX)) > MAX_TOTAL_BODY {
+        return Err(FrameError::Oversized);
+    }
+    Ok(())
 }
 
 fn read_one<R: Read>(
@@ -117,23 +143,25 @@ fn read_one<R: Read>(
 ) -> Result<Header, FrameError> {
     reader.read_exact(head).map_err(FrameError::Io)?;
     let header = Header::parse(head);
-    if let Some(want) = expect_count {
-        // py-iris _InStream raises "Invalid Message Count" on echo mismatch.
-        if header.count != want {
-            return Err(FrameError::Desync {
-                want,
-                got: header.count,
-            });
-        }
-    }
+    check_reply_count(&header, expect_count)?;
     Ok(header)
 }
 
 fn checked_body(length: u32) -> Result<Vec<u8>, FrameError> {
+    body_with_bound(length)
+}
+
+/// Allocate a body buffer only when `length` is within [`MAX_FRAME_BODY`] —
+/// the shared guard both drivers use before touching server memory
+/// (hygiene row 34).
+///
+/// # Errors
+/// [`FrameError::Oversized`] when `length` exceeds [`MAX_FRAME_BODY`].
+pub fn body_with_bound(length: u32) -> Result<Vec<u8>, FrameError> {
     if length > MAX_FRAME_BODY {
         return Err(FrameError::Oversized);
     }
-    Ok(vec![0u8; length as usize])
+    Ok(vec![0u8; usize::try_from(length).unwrap_or(0)])
 }
 
 /// Framing failures.
