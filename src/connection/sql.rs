@@ -66,18 +66,56 @@ pub struct QueryState {
     pub sqlcode: i16,
 }
 
+/// Cursor over a reply body that latches on the first unreadable or absent
+/// item, so a server-declared count can never spin a decode loop past the
+/// bytes that actually exist.
+struct ItemCursor<'a> {
+    reader: ListReader<'a>,
+    body_len: usize,
+    done: bool,
+}
+
+impl<'a> ItemCursor<'a> {
+    fn new(body: &'a [u8]) -> Self {
+        Self {
+            reader: ListReader::new(body),
+            body_len: body.len(),
+            done: false,
+        }
+    }
+
+    fn next(&mut self) -> Option<Item> {
+        if self.done {
+            return None;
+        }
+        match self.reader.next() {
+            Some(Ok(item)) => Some(item),
+            _ => {
+                self.done = true;
+                None
+            }
+        }
+    }
+
+    /// Whether the walk can no longer advance.
+    fn stopped(&self) -> bool {
+        self.done
+    }
+
+    /// Upper bound on items still declarable from the bytes that remain
+    /// (the smallest complete item is a two-byte prefix).
+    fn item_capacity(&self) -> usize {
+        self.body_len.saturating_sub(self.reader.offset()) / 2
+    }
+}
+
 /// Decode the DQ metadata message body.
 ///
 /// ref: go sql.go:statementFeature + getColumns + parameterInfo.
 #[must_use]
 pub fn decode_meta(body: &[u8]) -> Meta {
-    let mut r = ListReader::new(body);
-    let next_item = |r: &mut ListReader| -> Option<Item> {
-        match r.next() {
-            Some(Ok(i)) => Some(i),
-            _ => None,
-        }
-    };
+    let mut r = ItemCursor::new(body);
+    let next_item = |r: &mut ItemCursor| -> Option<Item> { r.next() };
     let feature_option = match next_item(&mut r) {
         Some(Item::Int(v)) => v,
         _ => 0,
@@ -95,8 +133,16 @@ pub fn decode_meta(body: &[u8]) -> Meta {
         Some(Item::Int(v)) => usize::try_from(v).unwrap_or(0),
         _ => 0,
     };
-    let mut columns = Vec::with_capacity(col_count);
+    // A server-supplied count must never drive a raw reservation: each
+    // declared column costs body bytes, so reserve by what could actually
+    // be read and stop the walk when the items run out (go getColumns does
+    // `make([]Column, cnt)` unchecked — documented divergence, hygiene
+    // rule: validate before allocating).
+    let mut columns = Vec::with_capacity(col_count.min(r.item_capacity() / 2));
     for _ in 0..col_count {
+        if r.stopped() {
+            break;
+        }
         let name = next_item(&mut r).map(|i| i.as_text()).unwrap_or_default();
         let type_code = match next_item(&mut r) {
             Some(Item::Int(v)) => v as i32,
@@ -136,19 +182,24 @@ pub fn decode_meta(body: &[u8]) -> Meta {
 /// layout between those was settled against a live 2025.3 capture (probes).
 #[must_use]
 pub fn decode_du_affected(body: &[u8]) -> i64 {
-    let mut r = ListReader::new(body);
+    let mut r = ItemCursor::new(body);
     let n_params = match r.next() {
-        Some(Ok(Item::Int(v))) => v,
+        Some(Item::Int(v)) => v.max(0) as usize,
         _ => 0,
     };
-    for _ in 0..n_params.saturating_mul(4) {
+    // The same hostile-count guard as decode_meta: a server-declared
+    // parameter count must not spin the walk past the bytes that exist.
+    for _ in 0..n_params.saturating_mul(4).min(body.len()) {
+        if r.stopped() {
+            break;
+        }
         let _ = r.next();
     }
     let _cache_flag = r.next();
     match r.next() {
-        Some(Ok(Item::Int(v))) => v,
-        Some(Ok(other)) => other.as_text().parse().unwrap_or(0),
-        _ => 0,
+        Some(Item::Int(v)) => v,
+        Some(other) => other.as_text().parse().unwrap_or(0),
+        None => 0,
     }
 }
 
@@ -365,6 +416,24 @@ mod tests {
         for n in 0..full.len() {
             let _ = decode_meta(&full[..n]);
         }
+    }
+
+    #[test]
+    fn decode_meta_bounds_a_hostile_column_count() {
+        // A tiny body declaring ~1e9 columns must not reserve (or build)
+        // anything near that count: each declared column costs at least two
+        // body bytes, so the reservation follows the bytes actually present.
+        let mut w = crate::wire::list::ListWriter::new();
+        w.set_int(0); // feature_option
+        w.set_int(1_000_000_000i64); // declared column count
+        let after_count = w.buf.len();
+        w.set_str("x"); // one token column
+        let meta = decode_meta(&w.buf);
+        assert!(
+            meta.columns.len() <= (w.buf.len() - after_count) / 2 + 1,
+            "columns {} far exceeds the bytes that declare them",
+            meta.columns.len()
+        );
     }
 
     #[test]

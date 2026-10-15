@@ -163,7 +163,11 @@ impl ListWriter {
             self.buf.extend_from_slice(&(total as u16).to_le_bytes());
             self.buf.push(type_byte);
         } else {
-            self.buf.extend_from_slice(&[0, 0]);
+            // three leading zeros introduce the 4-byte length form (py
+            // __set_list_length_type last branch); the reader only reaches
+            // for the u32 when its inner u16 is zero, so a two-zero prefix
+            // would misread the type byte as part of the length.
+            self.buf.extend_from_slice(&[0, 0, 0]);
             self.buf.extend_from_slice(&(total as u32).to_le_bytes());
             self.buf.push(type_byte);
         }
@@ -252,7 +256,9 @@ impl ListWriter {
                 self.raw(item_type::POS_INT, &data);
             }
             _ => {
-                let mut t = -v - 1;
+                // -v-1 in u64 space: total for i64::MIN, identical output
+                // for every other negative (py's arbitrary-int arithmetic).
+                let mut t = !(v as u64);
                 let mut data = Vec::new();
                 while t > 0 {
                     data.push(((!t) & 0xFF) as u8);
@@ -584,6 +590,29 @@ mod tests {
     }
 
     #[test]
+    fn large_payload_prefix_round_trips() {
+        // payloads above 0xFFFE data bytes take the 8-byte prefix form:
+        // three zeros, LE u32 of len+1, then the type byte (py
+        // _DBList.__set_list_length_type last branch; the reader's
+        // u16==0 branch below).
+        let mut w = ListWriter::new();
+        w.set_bytes(&vec![0x41u8; 65_535]);
+        assert_eq!(
+            &w.buf[..8],
+            &[0, 0, 0, 0x00, 0x00, 0x01, 0x00, item_type::ASCII]
+        );
+        for len in [65_534usize, 65_535, 65_536, 70_000] {
+            let mut w = ListWriter::new();
+            w.set_bytes(&vec![0x41u8; len]);
+            let item = ListReader::new(&w.buf)
+                .next()
+                .and_then(std::result::Result::ok)
+                .expect("item decodes");
+            assert_eq!(item.as_bytes().len(), len, "round-trip at {len} bytes");
+        }
+    }
+
+    #[test]
     fn int_roundtrip_including_negatives_and_zero() {
         for v in [
             0i64,
@@ -596,6 +625,8 @@ mod tests {
             -256,
             -70_000,
             i64::MIN + 1,
+            i64::MIN,
+            i64::MAX,
         ] {
             let mut w = ListWriter::new();
             w.set_int(v);
