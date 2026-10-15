@@ -41,7 +41,7 @@ jobs:
       - run: cargo test --all-features
 
   live-smoke:
-    name: Live smoke (fresh IRIS)
+    name: Live protocol suite (fresh IRIS)
     needs: lint
     runs-on: ubuntu-latest
     services:
@@ -75,7 +75,7 @@ jobs:
           halt
           EOSESS
       - name: Live protocol tests
-        run: cargo test -- --ignored --test-threads=1
+        run: cargo test --features async -- --include-ignored
         env:
           IRISHOST: 127.0.0.1
           IRISPORT: "1972"

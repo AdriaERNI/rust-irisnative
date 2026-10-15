@@ -11,11 +11,11 @@
 
 </div>
 
-> **Pre-release scaffold.** This crate ships its public API surface, docs and
-> probe infrastructure. The Superserver wire layer is **not implemented yet**:
-> `connect()` returns `Error::NotImplemented`, so nothing below runs against a
-> live server today. The protocol port is planned work (see
-> [probes/](probes/)).
+> **Pre-release.** The Superserver wire layer is implemented and proven
+> against a live IRIS **2025.3** (protocol 69): handshake/auth, globals,
+> SQL, class-method/property calls, transactions, and a tokio `async`
+> variant. TLS is not implemented — see [the protocol doc](docs/protocol.md)
+> for what is verified and how (see [probes/](probes/)).
 
 `irisnative` aims to be a pure-Rust client for **InterSystems IRIS** that
 speaks the native **Superserver wire protocol** on TCP port **1972** — the
@@ -47,20 +47,25 @@ Rust, with a deliberately small, typed API.
 
 ## Features (target surface)
 
-None of the unchecked boxes works yet — every method returns
-`Error::NotImplemented` until the protocol port lands.
+Verified against a live IRIS 2025.3 by `tests/protocol.rs` (run with
+`cargo test --features async -- --include-ignored`); unchecked boxes are
+not implemented or not proven yet.
 
-- [ ] Native handshake: username + auth (salted exchange per the reference drivers — see [the protocol doc](docs/protocol.md)), namespace attach
-- [ ] Globals: `get` / `set` / `kill` / `next` / subscript walks (`global!` macro)
-- [ ] SQL: statement prepare/execute/fetch, positional parameters
-- [ ] Objects: class-property access and class-method invocation — including `[Language = python]` methods
-- [ ] Sync API on `std::net`; `async` feature (tokio) behind a flag — **the flag exists in Cargo.toml but gates no code yet**
-- [ ] Small core: no runtime required for the sync path
+- [x] Native handshake: username + password obfuscated by the reference
+  drivers' positional rotate cipher, namespace attach (no salted
+  challenge/response exists on this path — probe-verified, see
+  [the protocol doc](docs/protocol.md))
+- [x] Globals: `get` / `set` / `kill` / `next` / subscript walks (`global!` macro)
+- [x] SQL: statement prepare/execute/fetch, positional parameters
+- [x] Objects: class-method invocation, OREF instance methods, class-property
+  get/set. `[Language = python]` methods *invoke* over this path, but the
+  native protocol carries no class-source loader, so deploying them needs a
+  separate route (Studio/Atelier REST) — see docs.
+- [x] Sync API on `std::net`; `async` feature (tokio) behind a flag — shares
+  the wire codec and command builders, zero logic forks
+- [x] Small core: no runtime required for the sync path
 
-## Quick start (API preview — does not run yet)
-
-The types and signatures below are what `src/lib.rs` actually exposes; the
-calls fail with `Error::NotImplemented` until the wire layer lands.
+## Quick start (API preview)
 
 ```rust,no_run
 use irisnative::{connect, global, ConnectionOptions};
@@ -91,10 +96,13 @@ own pure-Python client shipped in `iris-driver-distribution` and the
 Practical consequences you should weigh before production use:
 
 - Connections are **plaintext TCP today and until TLS support lands**: no
-  encryption by default. Password handling will follow the salted scheme the
-  reference drivers implement — verified by probe, not yet by this crate.
-  Credentials travel via `ConnectionOptions` / environment variables in our
-  examples; never hardcode them.
+  encryption by default. Probe truth (IRIS 2025.3, protocol 69, verified
+  2026-10-15): the connect packet carries username and password through the
+  reference drivers' **positional rotate cipher** (XOR `0xA7`, position
+  offset, 5-bit rotation) — an obfuscation, not a hash; there is **no salt
+  or challenge-response stage** after `CN`, so treat the network as knowing
+  your password. Credentials travel via `ConnectionOptions` / environment
+  variables in our examples; never hardcode them.
 - InterSystems may change the protocol without notice; expect to pin IRIS
   versions and re-run the compatibility suite on upgrades.
 - It is not, as far as publicly stated, licensed for third-party products —
@@ -109,15 +117,18 @@ Practical consequences you should weigh before production use:
 git clone https://github.com/AdriaERNI/rust-irisnative
 cd rust-irisnative
 docker compose up -d iris          # IRIS Community 2025.3, exposes 1972
-cargo test                         # unit tests (no server needed)
-cargo test --features async -- --ignored --test-threads=1   # live smoke (needs compose)
+cargo test                         # unit + golden-frame tests (no server needed)
+cargo test --features async -- --include-ignored   # live suite (needs the server)
 ```
 
-The live suite (`tests/live.rs`) is env-driven — `IRISHOST` (127.0.0.1),
+The live suite (`tests/protocol.rs`) is env-driven — `IRISHOST` (127.0.0.1),
 `IRISPORT` (1972), `IRISUSER` (_SYSTEM), `IRISPASSWORD` (SYS), `IRISNS`
-(USER) — the same variables `examples/connect.rs` reads. Against the current
-stubs it asserts only TCP reachability and that `connect()` fails
-gracefully; it pins no protocol behavior.
+(USER) — the same variables `examples/connect.rs` reads. On shared hosts
+where 1972 is taken, the dev container may map another port (our box uses
+19720). It drives real round-trips: handshake/auth, globals walks, SQL
+lifecycle, class-method/property calls, transactions, and a parity
+scenario compared value-for-value against the reference wire rules
+(`probes/parity_scenario.py`).
 
 - `documentation/` (git-ignored) holds the working protocol notes and raw
   probe output.
@@ -128,9 +139,8 @@ gracefully; it pins no protocol behavior.
 
 Rust **1.85** or newer — that is the first release stabilizing
 [edition 2024][edition-2024], which the crate is written in. CI stands up
-IRIS Community **2025.3** for the live-smoke leg; the protocol
-compatibility range is TBD pre-release (see
-[docs/protocol.md](docs/protocol.md)).
+IRIS Community **2025.3** for the live-suite leg; that version is the only
+one verified end-to-end so far (see [docs/protocol.md](docs/protocol.md)).
 
 ## License
 
