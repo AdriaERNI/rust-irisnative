@@ -50,7 +50,8 @@ matching go `mod.go:encode` and py `_IRISConnection.py:__encode`): there is
 **no salt and no challenge-response**. After the greeting and the `HS`
 protocol packet (raw LE u16 `69`), a single `CN` packet completes auth.
 Username and password are transformed per position — XOR `0xA7`, add the
-destination index `n - 1 - i`, rotate right 5 bits — and embedded as
+destination index `n - 1 - i`, rotate left 5 bits (`temp << 5 | temp >> 3`,
+i.e. `rotate_right(3)` in Rust) — and embedded as
 `%List` byte items. That is an obfuscation, not a hash: the password is
 recoverable from the frame, so **the network must be treated as knowing
 it**. Both reference drivers do exactly this; MD5/SHA appear nowhere on the

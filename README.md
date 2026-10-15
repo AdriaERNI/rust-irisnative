@@ -56,7 +56,8 @@ not implemented or not proven yet.
   challenge/response exists on this path — probe-verified, see
   [the protocol doc](docs/protocol.md))
 - [x] Globals: `get` / `set` / `kill` / `next` / subscript walks (`global!` macro)
-- [x] SQL: statement prepare/execute/fetch, positional parameters
+- [x] SQL: direct query (`DQ`/`DU`) execute and batched fetch, positional
+  parameters (no server-side prepare/cached statements yet)
 - [x] Objects: class-method invocation, OREF instance methods, class-property
   get/set. `[Language = python]` methods *invoke* over this path, but the
   native protocol carries no class-source loader, so deploying them needs a
