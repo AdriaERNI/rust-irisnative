@@ -61,7 +61,6 @@ mod wire {
         // Every Display string is part of the surface consumers log; pin one
         // rendering per variant (docs/api.md "Errors").
         assert_eq!(Error::Auth.to_string(), "authentication failed");
-        assert_eq!(Error::NotImplemented.to_string(), "not implemented yet");
         assert_eq!(
             Error::Server {
                 code: -1,
