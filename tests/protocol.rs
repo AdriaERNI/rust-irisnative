@@ -435,7 +435,7 @@ fn oref_method_and_property_round_trip() {
     let v = conn
         .method(&oref, "AcceptGzipGet", &[])
         .expect("instance method on OREF");
-    assert!(!v.is_empty());
+    assert_ne!(v, "");
     conn.property_set(&oref, "Location", "/probe")
         .expect("property set");
     assert_eq!(

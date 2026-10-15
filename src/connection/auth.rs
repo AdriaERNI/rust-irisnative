@@ -76,6 +76,6 @@ mod tests {
     #[test]
     fn system_user_never_panics() {
         let u = system_user();
-        assert!(!u.is_empty());
+        assert_ne!(u, "");
     }
 }
