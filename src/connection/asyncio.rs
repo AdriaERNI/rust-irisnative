@@ -48,7 +48,9 @@ pub struct Connection {
 /// Apply `ConnectionOptions::timeout_ms` to one IO future — the async twin
 /// of std's dial timeout + `set_read_timeout`. A missed deadline yields
 /// [`Error::Timeout`] (py raises `socket.timeout`, go
-/// `os.ErrDeadlineExceeded` — same distinct signal).
+/// `os.ErrDeadlineExceeded` — same distinct signal). The deadline is per
+/// socket read, not per operation; see [`Error::Timeout`] for what a
+/// deadline miss mid-reply means for the connection.
 async fn with_timeout<T>(timeout: Option<Duration>, fut: T) -> Result<T::Output>
 where
     T: Future,

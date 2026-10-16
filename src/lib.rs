@@ -672,6 +672,12 @@ pub enum Error {
     ///
     /// py-iris raises `socket.timeout` and go surfaces
     /// `os.ErrDeadlineExceeded` distinctly; this is the same separation.
+    /// The deadline applies to each socket read, not to a whole operation;
+    /// a read cancelled by the deadline mid-reply can leave part of a frame
+    /// unread, so the connection's reply stream is no longer dependable
+    /// after this error — the next request normally surfaces it as
+    /// `Error::Protocol` (reply-count desync); treat a timed-out connection
+    /// as one to close and reconnect, as with any IO error.
     #[error("operation timed out")]
     Timeout,
     /// Server refused or terminated the authentication handshake.
