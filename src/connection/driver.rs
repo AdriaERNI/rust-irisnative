@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn timeout_error_kinds_map_to_the_distinct_variant() {
-        // F-5: both shapes an expired socket read takes (std yields
+        // Both shapes an expired socket read takes (std yields
         // WouldBlock on a blocking socket, tokio TimedOut) must land on
         // Error::Timeout, while every other IO error stays Error::Io.
         for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
