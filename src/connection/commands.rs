@@ -31,7 +31,10 @@ use crate::wire::message::MessageBuilder;
 pub const CLIENT_FEATURE_OPTIONS: i64 = 1 + 4 + 32;
 
 /// Parameters for the `CN` connect packet.
-#[derive(Debug, Clone)]
+///
+/// `Debug` redacts `password` — the plaintext credential never appears in
+/// a debug rendering (same rule as [`crate::ConnectionOptions`]).
+#[derive(Clone)]
 pub struct ConnectParams<'a> {
     /// Target namespace.
     pub namespace: &'a str,
@@ -47,6 +50,21 @@ pub struct ConnectParams<'a> {
     /// probe (probes/refclient.py, 2026-10-15) — an empty field gets CN
     /// status 98 "Unable to allocate a license" on IRIS 2025.3.
     pub host_ip: &'a str,
+}
+
+impl std::fmt::Debug for ConnectParams<'_> {
+    /// Same redaction rule as [`crate::ConnectionOptions`]: the password
+    /// renders as a fixed marker, never plaintext.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectParams")
+            .field("namespace", &self.namespace)
+            .field("user", &self.user)
+            .field("password", &"***")
+            .field("machine", &self.machine)
+            .field("application", &self.application)
+            .field("host_ip", &self.host_ip)
+            .finish()
+    }
 }
 
 /// `HS` handshake request: raw little-endian protocol u16 (no %List

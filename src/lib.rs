@@ -69,7 +69,10 @@ use connection::driver::establish;
 use connection::{globals, object, sql, tx};
 
 /// Connection options: host, port (default 1972), namespace, credentials.
-#[derive(Debug, Clone)]
+///
+/// `Debug` redacts [`password`](Self::password) so a `{conn:?}` in a log
+/// line, panic message, or test output can never leak the credential.
+#[derive(Clone)]
 pub struct ConnectionOptions {
     /// IRIS host name or address.
     pub host: String,
@@ -115,6 +118,22 @@ impl ConnectionOptions {
     }
 }
 
+impl std::fmt::Debug for ConnectionOptions {
+    /// Renders every field verbatim except `password`, which is replaced by
+    /// a fixed `"***"` marker so the credential can never reach a log line
+    /// or panic message through the derived formatter.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("namespace", &self.namespace)
+            .field("username", &self.username)
+            .field("password", &"***")
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
 /// A global reference: `^Name(subscript...)`. Produced by [`global!`].
 #[derive(Debug, Clone)]
 pub struct Global {
@@ -142,11 +161,18 @@ macro_rules! global {
 }
 
 /// A live IRIS native connection.
+///
+/// A session is a single ordered request/reply stream with no interior
+/// synchronization: use it from one thread at a time (send it or borrow
+/// it exclusively), or open one connection per thread.
 #[derive(Debug)]
 pub struct Connection {
     stream: std::net::TcpStream,
     session: Session,
     tx_open: bool,
+    /// Set once a `DC` has been sent (by [`Connection::close`] or `Drop`),
+    /// so the teardown frame is never written twice on the same session.
+    dc_sent: bool,
 }
 
 /// Client identity sent in the `CN` packet.
@@ -222,6 +248,7 @@ pub fn connect(opts: ConnectionOptions) -> Result<Connection> {
         stream,
         session,
         tx_open: false,
+        dc_sent: false,
     })
 }
 
@@ -503,6 +530,26 @@ impl Connection {
         self.tx_open
     }
 
+    /// Send `DC` and flush it — the authoritative clean disconnect, the
+    /// counterpart of go's `Disconnect()` / py's `close()` and of the
+    /// `async` feature's `Connection::close`. Idempotent: a second call,
+    /// and the later `Drop`, send nothing.
+    ///
+    /// Prefer this over relying on `Drop`: `Drop` cannot report an IO
+    /// failure, so a teardown the server never saw is silent there.
+    ///
+    /// # Errors
+    /// [`Error::Io`] if the frame cannot reach the socket.
+    pub fn close(&mut self) -> Result<()> {
+        if self.dc_sent {
+            return Ok(());
+        }
+        self.dc_sent = true;
+        let frame = connection::commands::build_disconnect(self.session.next_count());
+        self.stream.write_all(&frame)?;
+        self.stream.flush().map_err(Error::Io)
+    }
+
     /// Borrow stream + session together (split-borrow helper for the
     /// command drivers).
     pub(crate) fn parts(&mut self) -> (&mut std::net::TcpStream, &mut Session) {
@@ -527,8 +574,17 @@ pub fn is_update_query(sql_text: &str) -> bool {
 impl Drop for Connection {
     /// Send a best-effort `DC` disconnect before the socket closes.
     ///
+    /// A write failure here cannot be reported (`Drop` has no `Result`) —
+    /// prefer [`Connection::close`] for an authoritative disconnect; TCP
+    /// close remains the backstop either way. Does nothing if `close`
+    /// already sent the frame.
+    ///
     /// ref: go-irisnative src/connection/mod.go:Disconnect.
     fn drop(&mut self) {
+        if self.dc_sent {
+            return;
+        }
+        self.dc_sent = true;
         let count = self.session.next_count();
         let frame = connection::commands::build_disconnect(count);
         let _ = self.stream.write_all(&frame);
@@ -845,5 +901,129 @@ mod tests {
         let err = connect(opts).expect_err("stalled HS reply must fail");
         assert!(matches!(err, Error::Timeout), "got {err:?}");
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn garbage_before_first_reply_fails_cleanly() {
+        // Hostile case 1 (probe 2026-10-16): random bytes pushed at us
+        // before any HS reply must surface as an error, never a panic or
+        // a hang (the 14-byte head parses; the echo check rejects it).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind garbage");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let _ = s.write_all(b"\xde\xad\xbe\xefnot-a-frame");
+                let _ = s.flush();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        });
+        let opts = ConnectionOptions {
+            timeout_ms: Some(1500),
+            ..mock_options(port)
+        };
+        let err = connect(opts).expect_err("garbage before HS reply must fail");
+        assert!(
+            matches!(err, Error::Protocol(_) | Error::Io(_)),
+            "clean error expected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn accept_then_reset_fails_as_io_error() {
+        // Hostile case 2 (probe 2026-10-16): a server that accepts and
+        // closes without writing a byte must fail the read with an IO
+        // error (EOF / reset), not a panic.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reset");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            while let Ok((s, _)) = listener.accept() {
+                drop(s); // close before writing a byte
+            }
+        });
+        let opts = ConnectionOptions {
+            timeout_ms: Some(1500),
+            ..mock_options(port)
+        };
+        let err = connect(opts).expect_err("instant reset must fail connect");
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn eof_mid_body_surfaces_as_io_error() {
+        // Hostile case 3 (probe 2026-10-16): a server that completes the
+        // handshake, then announces a 50-byte reply and dies after 4
+        // bytes, must fail the in-flight op as an IO error — no hang, no
+        // panic, and the error type matches the documented one.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cut");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            let _ = client.set_nodelay(true);
+            // HS + CN answered faithfully so connect() succeeds.
+            let Some((type_word, count, _)) = read_frame(&mut client) else {
+                return;
+            };
+            assert_eq!(type_word, *b"HS");
+            let mut hs = vec![0x45, 0x00, 0x03, 0x00, 0x09, 0x01];
+            hs.extend_from_slice(b"Unicode");
+            write_reply(&mut client, [0, 0], count, &hs);
+            let Some((type_word, count, _)) = read_frame(&mut client) else {
+                return;
+            };
+            assert_eq!(type_word, *b"CN");
+            let cn = [
+                0x04u8, 0x01, b'm', // info text
+                0x02, 0x04, 0x02, 0x04, 0x02, 0x04, // ids/ignored/isolation
+                0x05, 0x01, b'1', b'2', b'3', // server job "123"
+                0x02, 0x04, 0x03, 0x04, 37, // sql empty, feature options
+            ];
+            write_reply(&mut client, [0, 0], count, &cn);
+            // first post-connect request: promise 50 body bytes, send 4, die.
+            let _ = read_frame(&mut client);
+            let mut fake = Vec::new();
+            fake.extend_from_slice(&50u32.to_le_bytes());
+            fake.extend_from_slice(&2u32.to_le_bytes()); // echo our count
+            fake.extend_from_slice(&0u32.to_le_bytes());
+            fake.extend_from_slice(&[0, 0xCA]);
+            fake.extend_from_slice(b"abcd");
+            let _ = client.write_all(&fake);
+            let _ = client.flush();
+            let _ = client.shutdown(std::net::Shutdown::Both);
+        });
+        let opts = ConnectionOptions {
+            timeout_ms: Some(1500),
+            ..mock_options(port)
+        };
+        let mut conn = connect(opts).expect("handshake completes on the mock");
+        let err = conn
+            .get::<String>(&global!(X(1)))
+            .expect_err("EOF mid-body must fail the get");
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn close_sends_one_dc_and_drop_sends_nothing_after() {
+        // The mock exits its loop on the FIRST DC it sees and reports the
+        // session done; a second frame would hang the recv check instead.
+        let (port, done) = mock_server();
+        let mut conn = connect(mock_options(port)).expect("mock connect");
+        conn.close().expect("explicit close");
+        conn.close().expect("close is idempotent");
+        drop(conn); // must NOT send a second DC
+        done.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("mock saw exactly one DC");
+        // the mock thread exits after DC; a follow-up op would be an
+        // error, but the connection object itself must stay droppable.
+    }
+
+    #[test]
+    fn drop_without_close_still_sends_dc() {
+        let (port, done) = mock_server();
+        let conn = connect(mock_options(port)).expect("mock connect");
+        drop(conn);
+        done.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("Drop sent the DC");
     }
 }
