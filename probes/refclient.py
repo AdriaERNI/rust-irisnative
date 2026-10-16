@@ -216,6 +216,12 @@ class Conn:
         """Decode one %List item; returns (value, next_offset) (go GetListItem)."""
         b0 = body[off]
         if b0 == 0:
+            if body[off + 1] == 0 and body[off + 2] == 0:
+                # py _DBList._get_data_offset big branch: three zeros,
+                # 4-byte length at +3..+7, type at +7, data from +8.
+                n = struct.unpack_from("<I", body, off + 3)[0] - 1
+                data = body[off + 8: off + 8 + n]
+                return data, off + 8 + n
             n = struct.unpack_from("<H", body, off + 1)[0] - 1
             t = body[off + 3]
             data = body[off + 4: off + 4 + n]
