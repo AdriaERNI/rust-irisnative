@@ -456,6 +456,51 @@ fn oref_method_and_property_round_trip() {
 
 #[test]
 #[ignore = "needs a live IRIS"]
+fn explicit_close_disconnects_the_server_job() {
+    // Same watcher pattern as the Drop test, but the teardown is the
+    // explicit close(): authoritative, idempotent, and the job must go.
+    let mut watcher = connect(
+        ConnectionOptions::new(
+            env_or("IRISHOST", "127.0.0.1"),
+            "%SYS",
+            env_or("IRISUSER", "_SYSTEM"),
+            env_or("IRISPASSWORD", "SYS"),
+        )
+        .port(env_or("IRISPORT", "1972").parse().unwrap_or(1972)),
+    )
+    .expect("watcher connects to %SYS");
+
+    let mut conn = connected();
+    let job: i64 = conn
+        .info()
+        .server_job
+        .parse()
+        .expect("job number is numeric");
+    let alive = |w: &mut irisnative::Connection| -> bool {
+        let mut rs = w
+            .query(&format!(
+                "SELECT Pid FROM %SYS.ProcessQuery WHERE Pid = {job}"
+            ))
+            .expect("process query");
+        rs.fetch_next().expect("fetch")
+    };
+    assert!(alive(&mut watcher), "job {job} alive while held");
+    conn.close().expect("close is Ok");
+    conn.close().expect("close is idempotent");
+    drop(conn); // must not send a second DC
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while alive(&mut watcher) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job {job} survived close() — the DC did not land"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    println!("job {job} terminated after close() sent DC");
+}
+
+#[test]
+#[ignore = "needs a live IRIS"]
 fn dropping_the_connection_disconnects_the_server_job() {
     // Hygiene: Drop sends DC; the server job must go away. Verified
     // through %SYS.ProcessQuery on a second connection (the JobNumber field

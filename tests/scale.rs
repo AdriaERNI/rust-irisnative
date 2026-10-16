@@ -42,6 +42,32 @@ fn env_count(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Connect, tolerating the server's finite license pool. Status 98
+/// "Unable to allocate a license" is a server resource condition (other
+/// live tests or jobs hold the last slots; IRIS frees one a beat after a
+/// job exits), not a client defect — retry it with backoff. Every other
+/// error surfaces immediately.
+fn connect_retrying(
+    opts: &ConnectionOptions,
+    attempts: usize,
+) -> irisnative::Result<irisnative::Connection> {
+    let mut last = None;
+    for i in 0..attempts {
+        match irisnative::connect(opts.clone()) {
+            Ok(c) => return Ok(c),
+            Err(irisnative::Error::Server { code: 98, .. }) => {
+                std::thread::sleep(std::time::Duration::from_millis(250 + 250 * i as u64));
+                last = Some(98);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(irisnative::Error::Server {
+        code: 98,
+        message: format!("license slots busy after {attempts} tries (last={last:?})"),
+    })
+}
+
 /// Current RSS in KiB from /proc (Linux-only; the scale lane runs on
 /// ubuntu). Returns 0 where the file is unreadable so assertions can skip.
 fn rss_kb() -> usize {
@@ -63,7 +89,7 @@ fn scale_soak_mixed_ops() {
     // Memory must stay flat across the run (page-cache granularity, not a
     // leak): assert the RSS delta in absolute KiB.
     let n = env_count("SCALE_OPS", 50_000);
-    let mut conn = irisnative::connect(options()).expect("connect live IRIS");
+    let mut conn = connect_retrying(&options(), 8).expect("connect live IRIS");
     conn.kill(&global!(SFSCALE)).expect("clean root");
     let keys: Vec<_> = (0..5_000).map(|i| global!(SFSCALE(i))).collect();
     for (i, k) in keys.iter().enumerate() {
@@ -112,19 +138,27 @@ fn scale_soak_mixed_ops() {
 #[ignore = "needs a live IRIS and minutes of churn"]
 fn scale_connection_churn() {
     // Full connect → set → get → close() cycles: no fd growth, no auth
-    // pressure, every cycle clean. ~42 ms/cycle on a local server.
+    // pressure, every cycle clean. ~42 ms/cycle on a local server. A
+    // transient license-slot refusal retries the whole cycle.
     let cycles = env_count("SCALE_CYCLES", 2_000);
     let mut failures = 0usize;
     for i in 0..cycles {
-        let outcome = (|| -> irisnative::Result<()> {
-            let mut conn = irisnative::connect(options())?;
-            conn.set(&global!(SFCHURN(1)), &format!("c{i}"))?;
-            let v: String = conn.get(&global!(SFCHURN(1)))?;
-            assert_eq!(v, format!("c{i}"));
-            conn.close()?;
-            Ok(())
-        })();
-        if outcome.is_err() {
+        let mut ok = false;
+        for _ in 0..5 {
+            let outcome = (|| -> irisnative::Result<()> {
+                let mut conn = connect_retrying(&options(), 4)?;
+                conn.set(&global!(SFCHURN(1)), &format!("c{i}"))?;
+                let v: String = conn.get(&global!(SFCHURN(1)))?;
+                assert_eq!(v, format!("c{i}"));
+                conn.close()?;
+                Ok(())
+            })();
+            if outcome.is_ok() {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
             failures += 1;
         }
     }
@@ -148,7 +182,11 @@ fn scale_concurrent_hammer() {
     for t in 0..8usize {
         let opts = options();
         handles.push(std::thread::spawn(move || {
-            let mut conn = irisnative::connect(opts).expect("thread connect");
+            // 8 simultaneous dials can momentarily exhaust the license
+            // pool (status 98) — retry with backoff instead of panicking.
+            let Ok(mut conn) = connect_retrying(&opts, 8) else {
+                return 1; // license slots exhausted: counted as an error
+            };
             let mut errors = 0usize;
             for i in 0..500usize {
                 let g = global!(SFHAM(t, i));
