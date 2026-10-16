@@ -80,7 +80,7 @@ Failures map to `Error::Auth` (bad credentials) or `Error::Server`.
 | SQL | `DQ` query, `DU` update, `FD` fetch | `DQ`/`DU` reuse the direct protocol with the statement id in the header; positional `?` parameters are rewritten server-side to `:%qpar(n)` (go `formatQuery` parity); metadata comes from a binary layout on the `DQ` reply; SQLCODE errors surface as `Error::Server` |
 | Objects | `0xC24B`/`0xC24C` class-method value/void, `0xC25B`/`0xC25C` OREF method, `0xC25D`/`0xC25E` property | OREFs are `%List` items of type `0x19` (e.g. `5@%Net.HttpRequest`); server errors from XDCall (1148 method not found, 1150 class not found, 1197 private) map through the same status decode |
 | Transactions | `TC` / `TR` plus `DU` for `START TRANSACTION` | gated on the negotiated `DurableTransactions` feature bit; nested begin is refused client-side |
-| Session | `HS` `CN` `DC` | `DC` on `Drop`: sync writes it straight to the socket (verified by watching the server job disappear in `%SYS`); async `Drop` is best-effort without a runtime — `async::Connection::close()` is the authoritative disconnect, TCP close is the backstop |
+| Session | `HS` `CN` `DC` | `DC` teardown: `Connection::close()` sends and flushes it on both drivers (sync and async; the authoritative disconnect, go `Disconnect()` / py `close()` parity) — `Drop` is the backstop: sync writes it straight to the socket (verified by watching the server job disappear in `%SYS`), async `Drop` is best-effort without a runtime. TCP close is the final backstop either way |
 
 **Embedded Python caveat.** A `[Language = python]` class method, once it
 exists on the server, is invoked exactly like any class method through
@@ -110,3 +110,16 @@ one either.
 (2025.3 verified 2026-10-15, protocol 69 negotiated). ⏳ = untested. A cell
 turns ✅/❌ only via a green/red run of the live suite against that version;
 date every result.
+
+The `latest` image tag (2026.1 at the time of writing) has NOT been
+validated: a boot attempt with the plain `IRIS_PASSWORD` env recipe hit the
+same unreliable startup path CI works around, so no conclusion about this
+client against 2026.1 exists either way — the matrix stays honest and does
+not list it.
+
+The 2024.x row stays ⏳ for a different reason: cross-version validation is
+deferred, not skipped silently. The Community Edition images from that
+release line fail to start on the current CI and development hosts (the
+licensing check of that era rejects hosts with 4 or more cores), so a live
+run needs a compatible small-core host before any 2024.x cell can turn
+✅/❌.

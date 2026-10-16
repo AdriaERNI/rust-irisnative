@@ -13,9 +13,17 @@ this page is a bug to report.
 
 | Item | Shape | Notes |
 |---|---|---|
-| `ConnectionOptions::new(host, ns, user, pass)` | builder | port defaults to **1972**; `.port(p)` overrides |
+| `ConnectionOptions::new(host, ns, user, pass)` | builder | port defaults to **1972**; `.port(p)` overrides; `Debug` renders `password` as `"***"`, never plaintext |
 | `connect(opts) -> Result<Connection>` | sync | TCP + greeting + handshake (`HS`) + auth/namespace attach (`CN`) |
+| `conn.close() -> Result<()>` | sync | authoritative `DC` disconnect (go `Disconnect` / py `close` parity); idempotent — `Drop` afterwards sends nothing; `Drop` alone stays best-effort (it cannot report an IO error), so prefer `close()` |
 | `conn.server_version() -> Result<String>` | | banner via `%SYSTEM.Version.GetVersion` |
+
+A connection is one ordered request/reply stream with no interior
+synchronization: hand ownership (or `&mut`) to one thread at a time, or
+open a connection per thread. After an IO error or timeout the reply
+stream is no longer dependable — the recovery path is `close()` (or
+`drop`) plus a fresh `connect()`; there is no reconnect-in-place API, and
+no pooling helper ships with the crate.
 
 ## Globals (M-level)
 
@@ -63,5 +71,11 @@ timeout, not a per-operation budget; both drivers honor it).
   identical to the sync path, pinned by the golden-frame fixtures.
 - MSRV **1.85**: the first Rust release with stable edition 2024, which the
   crate is written in.
+- Robustness evidence is deterministic pseudo-random property tests
+  (hand-rolled xorshift: header and `%List` round-trips plus garbage
+  streams, `tests/wire.rs`) and the targeted hostile-server cases
+  (garbage before the first reply, accept-then-reset, EOF mid-body,
+  stalled reads — `src` unit tests), not a coverage-guided fuzzer; no
+  fuzzing harness is shipped.
 - IRIS strings are byte-oriented; conversions go through `value::Value` so M
   canonical-number rules can be pinned in one place.

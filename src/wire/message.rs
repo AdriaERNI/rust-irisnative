@@ -297,6 +297,33 @@ mod tests {
     }
 
     #[test]
+    fn count_check_is_exact_across_the_u32_wrap() {
+        // Session counts wrap at u32::MAX (session.rs next_count); the echo
+        // check is exact equality, so both sides of the boundary accept and
+        // a stale pre-wrap echo must be rejected, not matched modulo wrap.
+        let at_max = Header::request(MessageType::new(b'A', b'B'), 0, u32::MAX, 0);
+        assert!(check_reply_count(&at_max, Some(u32::MAX)).is_ok());
+        let at_zero = Header::request(MessageType::new(b'A', b'B'), 0, 0, 0);
+        assert!(check_reply_count(&at_zero, Some(0)).is_ok());
+        assert!(matches!(
+            check_reply_count(&at_zero, Some(u32::MAX)),
+            Err(FrameError::Desync {
+                want: u32::MAX,
+                got: 0
+            })
+        ));
+        assert!(matches!(
+            check_reply_count(&at_max, Some(0)),
+            Err(FrameError::Desync {
+                want: 0,
+                got: u32::MAX
+            })
+        ));
+        // an unchecked read (expect None) never desyncs on count
+        assert!(check_reply_count(&at_max, None).is_ok());
+    }
+
+    #[test]
     fn eof_mid_body_is_io_error() {
         let mut frame = encode_frame(MessageType::new(b'F', b'D'), 0, 0, &[]);
         frame[0..4].copy_from_slice(&10u32.to_le_bytes()); // promise 10 bytes
