@@ -24,6 +24,11 @@ tokio = { version = "1", features = ["net", "io-util", "rt", "time"], optional =
 [dev-dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
 
+[package.metadata.docs.rs]
+# Build the async module too, so docs.rs parity with the feature-gated
+# surface holds (all-features pulls in `async`).
+all-features = true
+
 [lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"

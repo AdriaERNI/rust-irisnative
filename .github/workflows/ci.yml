@@ -20,7 +20,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  msrv:
+    name: MSRV (1.85) check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The rust-version claim in Cargo.toml/README is only true while this
+      # parses and typechecks; check (not test) — edition-2024 needs 1.85.
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo check --all-features --all-targets
 
   test:
     name: Test
@@ -30,6 +40,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-features
+      # Release profile has different overflow semantics; the codecs use
+      # explicit wrapping_*/saturating_* so both must agree — pinned here
+      # (unit + golden only; live legs run debug-only below).
+      - run: cargo test --release --all-features
+
+  package-verify:
+    name: Package verify (build + test from the .crate)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Extract and test the published tarball
+        run: |
+          cargo package --allow-dirty
+          mkdir -p /tmp/crate-check
+          tar -xzf target/package/irisnative-*.crate -C /tmp/crate-check
+          cd /tmp/crate-check/irisnative-*
+          cargo test --all-features
 
   windows:
     name: Windows (compile + unit tests)
@@ -75,7 +104,10 @@ jobs:
           halt
           EOSESS
       - name: Live protocol tests
-        run: cargo test --features async -- --include-ignored
+        # The long-running scale suite (soak/churn/hammer) stays out of the
+        # per-PR budget; it runs in the manual/nightly lane with
+        # `--include-ignored scale_`.
+        run: cargo test --features async -- --include-ignored --skip scale_
         env:
           IRISHOST: 127.0.0.1
           IRISPORT: "1972"
