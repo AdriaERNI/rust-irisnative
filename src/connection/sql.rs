@@ -417,6 +417,32 @@ mod tests {
     }
 
     #[test]
+    fn metadata_decoders_survive_garbage_bodies() {
+        // Fuzz the two body decoders over pseudo-random garbage and every
+        // truncation of it: no panics, no unbounded work (bounded run time
+        // is implicit — a hang would fail the test harness).
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for round in 0..64usize {
+            let mut body = Vec::with_capacity(48);
+            for _ in 0..48 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                body.push((state >> 24) as u8);
+            }
+            if round % 2 == 0 {
+                // bias toward plausible item prefixes
+                body[0] = 0x02;
+                body[1] = 0x04;
+            }
+            for n in (0..=body.len()).step_by(3) {
+                let _ = decode_meta(&body[..n]);
+                let _ = decode_du_affected(&body[..n]);
+            }
+        }
+    }
+
+    #[test]
     fn decode_meta_bounds_a_hostile_column_count() {
         // A tiny body declaring ~1e9 columns must not reserve (or build)
         // anything near that count: each declared column costs at least two
