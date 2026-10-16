@@ -179,3 +179,44 @@ pub fn first_item(body: &[u8]) -> Result<Option<Item>> {
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::wire::message::FrameError;
+
+    #[test]
+    fn timeout_error_kinds_map_to_the_distinct_variant() {
+        // F-5: both shapes an expired socket read takes (std yields
+        // WouldBlock on a blocking socket, tokio TimedOut) must land on
+        // Error::Timeout, while every other IO error stays Error::Io.
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
+            let e = map_frame_err(FrameError::Io(std::io::Error::new(kind, "stale")));
+            assert!(matches!(e, Error::Timeout), "{kind:?} -> {e:?}");
+        }
+        let e = map_frame_err(FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "closed",
+        )));
+        assert!(matches!(e, Error::Io(_)), "got {e:?}");
+    }
+
+    #[test]
+    fn auth_status_stays_auth_not_timeout() {
+        // Negative: the distinct Error::Timeout must not swallow the
+        // login-rejection mapping (status 417 -> Error::Auth).
+        let mut session = Session::default();
+        let reply = Reply {
+            header: crate::wire::header::Header {
+                length: 0,
+                count: 0,
+                statement_id: 0,
+                type_word: 417u16.to_le_bytes(),
+            },
+            body: Vec::new(),
+        };
+        let e = apply_connect(&reply, &mut session).expect_err("417 rejects");
+        assert!(matches!(e, Error::Auth), "got {e:?}");
+    }
+}

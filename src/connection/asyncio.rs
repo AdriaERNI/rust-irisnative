@@ -576,3 +576,204 @@ async fn read_reply_async<S: AsyncReadExt + Unpin>(
     }
     Ok(Reply { header, body })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::wire::header::{CONTINUATION_BIT, Header, MessageType};
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    fn read_frame(s: &mut std::net::TcpStream) -> Option<([u8; 2], [u8; 4], Vec<u8>)> {
+        let mut head = [0u8; 14];
+        if s.read_exact(&mut head).is_err() {
+            return None;
+        }
+        let length = u32::from_le_bytes(head[0..4].try_into().unwrap_or([0; 4])) as usize;
+        let mut body = vec![0u8; length];
+        if s.read_exact(&mut body).is_err() {
+            return None;
+        }
+        Some((
+            [head[12], head[13]],
+            head[4..8].try_into().unwrap_or([0; 4]),
+            body,
+        ))
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // fixture bodies are tiny
+    fn write_reply(s: &mut std::net::TcpStream, type_word: [u8; 2], count: [u8; 4], body: &[u8]) {
+        let mut frame = Vec::with_capacity(14 + body.len());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&count);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&type_word);
+        frame.extend_from_slice(body);
+        let _ = s.write_all(&frame);
+        let _ = s.flush();
+    }
+
+    /// Answer `HS` + `CN` like the live server (same fixtures as the sync
+    /// mock in lib.rs), then serve until `DC`. Offline probe server.
+    fn serve_mock(mut client: std::net::TcpStream) {
+        let Some((type_word, count, _)) = read_frame(&mut client) else {
+            return;
+        };
+        if type_word != *b"HS" {
+            return;
+        }
+        let mut hs = vec![0x45, 0x00, 0x03, 0x00, 0x09, 0x01];
+        hs.extend_from_slice(b"Unicode");
+        write_reply(&mut client, [0, 0], count, &hs);
+        let Some((type_word, count, _)) = read_frame(&mut client) else {
+            return;
+        };
+        if type_word != *b"CN" {
+            return;
+        }
+        let cn = [
+            0x04u8, 0x01, b'm', // info text
+            0x02, 0x04, // delimited ids 0
+            0x02, 0x04, // ignored 0
+            0x02, 0x04, // isolation 0
+            0x05, 0x01, b'1', b'2', b'3', // server job "123"
+            0x02, 0x04, // sql empty 0
+            0x03, 0x04, 37, // feature options
+        ];
+        write_reply(&mut client, [0, 0], count, &cn);
+        loop {
+            let Some((type_word, count, _)) = read_frame(&mut client) else {
+                return;
+            };
+            if type_word == [0x44, 0x43] {
+                return; // DC
+            }
+            write_reply(&mut client, [0, 0xCA], count, &[]);
+        }
+    }
+
+    fn mock_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                serve_mock(stream);
+            }
+        });
+        port
+    }
+
+    fn mock_options(port: u16) -> ConnectionOptions {
+        ConnectionOptions::new("127.0.0.1", "USER", "_SYSTEM", "SYS").port(port)
+    }
+
+    #[tokio::test]
+    async fn async_dial_sets_tcp_nodelay() {
+        // Same claim the sync mock test pins, on the tokio path (go's
+        // TCPConn runs NODELAY by default; Nagle taxes this ping-pong).
+        let port = mock_server();
+        let conn = Connection::connect(mock_options(port))
+            .await
+            .expect("mock async connect");
+        assert!(
+            conn.stream.get_ref().nodelay().expect("nodelay queryable"),
+            "the async client socket must run TCP_NODELAY"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_stalled_read_maps_to_timeout_error() {
+        // timeout_ms must bound async reads too, as Error::Timeout — the
+        // parity twin of the sync stalled-read test. A listener that
+        // accepts and never replies parks the HS read; if with_timeout
+        // were dead wiring this would hang until the harness kills it.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stall");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            while let Ok(s) = listener.accept() {
+                parked.push(s); // accept and never reply
+            }
+        });
+        let opts = ConnectionOptions {
+            timeout_ms: Some(150),
+            ..mock_options(port)
+        };
+        let start = std::time::Instant::now();
+        let err = Connection::connect(opts)
+            .await
+            .expect_err("stalled HS reply must fail");
+        assert!(matches!(err, Error::Timeout), "got {err:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn async_stalled_dial_maps_to_timeout_error() {
+        // Dial-side parity: an unroutable address (TEST-NET-1, RFC 5737)
+        // with a short timeout must fail as Error::Timeout, not hang. If
+        // the environment instead refuses the route, an immediate Io error
+        // is the same contract, so only a hang would be a defect.
+        let opts = ConnectionOptions {
+            timeout_ms: Some(200),
+            ..mock_options(9)
+        };
+        let mut opts = opts;
+        opts.host = "192.0.2.1".into();
+        let start = std::time::Instant::now();
+        let result = Connection::connect(opts).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "dial hung {elapsed:?}"
+        );
+        match result {
+            // no route at all: refused fast — either way, never a hang
+            Err(Error::Timeout | Error::Io(_)) => {}
+            other => panic!("unexpected dial outcome: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_zero_length_continuations_are_bounded() {
+        // The chunk-count guard must be on the async loop too: an endless
+        // stream of length-0 continuation frames would otherwise spin
+        // forever (probe 2026-10-15) because the byte cap never trips.
+        struct EndlessZerosAsync {
+            buf: Vec<u8>,
+            pos: usize,
+        }
+        impl EndlessZerosAsync {
+            fn new() -> Self {
+                let header = Header::request(MessageType::new(0, 0), 0, 0, CONTINUATION_BIT)
+                    .encode()
+                    .to_vec();
+                Self {
+                    buf: header,
+                    pos: 0,
+                }
+            }
+        }
+        impl tokio::io::AsyncRead for EndlessZerosAsync {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                dst: &mut tokio::io::ReadBuf,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let n = (self.buf.len() - self.pos).min(dst.remaining());
+                dst.put_slice(&self.buf[self.pos..self.pos + n]);
+                self.pos += n;
+                if self.pos >= self.buf.len() {
+                    self.pos = 0; // endless: rewind, never EOF
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let result = read_reply_async(&mut EndlessZerosAsync::new(), Some(0), None).await;
+        assert!(
+            matches!(&result, Err(Error::Protocol(m)) if m.contains("bound")),
+            "async loop must cap continuation chunks, got {result:?}"
+        );
+    }
+}

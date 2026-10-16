@@ -967,5 +967,19 @@ async fn async_connection_drives_the_same_wire() {
         .expect("async class_method_void");
     conn.global_kill("SFPA", &[]).await.expect("kill subtree");
     assert!(!conn.is_defined("SFPA", &["1".into()]).await.expect("gone"));
+    // The 4-byte %List size prefix (>65 534 bytes) is written by the
+    // shared ListWriter; pin a 70 KiB value on the async wire too so the
+    // prefix fix cannot regress on one driver only.
+    let big = "Z".repeat(70_000);
+    conn.global_set("SFBIG", &["1".into()], &big)
+        .await
+        .expect("async 70 KiB set");
+    let got = conn
+        .global_get("SFBIG", &["1".into()])
+        .await
+        .expect("async 70 KiB get");
+    assert_eq!(got.as_deref().map(str::len), Some(big.len()));
+    assert_eq!(got.as_deref(), Some(big.as_str()));
+    conn.global_kill("SFBIG", &[]).await.expect("kill 70 KiB");
     conn.close().await.expect("async close sends DC");
 }
