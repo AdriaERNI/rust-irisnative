@@ -41,7 +41,7 @@ jobs:
       - run: cargo test --all-features
 
   live-smoke:
-    name: Live protocol suite (fresh IRIS)
+    name: Live smoke (fresh IRIS)
     needs: lint
     runs-on: ubuntu-latest
     services:
