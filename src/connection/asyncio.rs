@@ -136,6 +136,10 @@ impl Connection {
 
     /// `GLOBAL_GET` (0xC241): the node's text, or [`None`] when undefined.
     ///
+    /// Undefined reads return `Ok(None)` (go-style raw `GlobalGet`); the
+    /// sync [`crate::Connection::get`] raises `Error::Server(-1009,
+    /// "<UNDEFINED>")` instead (py-style). Same wire, by design.
+    ///
     /// # Errors
     /// Transport/server failures.
     pub async fn global_get(&mut self, name: &str, subs: &[String]) -> Result<Option<String>> {

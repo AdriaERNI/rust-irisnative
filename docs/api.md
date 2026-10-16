@@ -22,14 +22,15 @@ this page is a bug to report.
 | Item | Shape | Notes |
 |---|---|---|
 | `global!(Name)` / `global!(Name(sub, ...))` | macro | builds a `Global` reference; subscripts stringify |
-| `conn.get::<T>(&g)` / `set(&g, v)` / `kill(&g)` | | typed via `value::Value` |
-| `conn.next(&mut g) -> Option<String>` | cursor | collation-order subscript walk |
+| `conn.get::<T>(&g)` / `set(&g, v)` / `kill(&g)` | | typed via `value::Value`; names/subscripts are **not** validated client-side — the server's `<SYNTAX>`/`<UNDEFINED>` surfaces as `Error::Server`, as in both reference drivers |
+| `conn.next(&mut g) -> Option<String>` | cursor | collation-order subscript walk: sibling cursor at M `$ORDER` level (go `GlobalNext` parity); compose `next` + recursion for subtree descent |
 
 ## SQL
 
 | Item | Shape | Notes |
 |---|---|---|
 | `conn.query(sql) -> Result<ResultSet>` | | one-shot statements |
+| `conn.query_params(sql, &[Option<String>])` | | `?` placeholders bind as canonical M strings (server-inferred type, bind type 99 — same wire as go's `toODBC`); binary/temporal typed binding is not exposed |
 | `rs.fetch_next() -> Result<bool>` | | `false` past the last row |
 | `rs.get::<T>(col) -> Result<T>` | | 0-based column index |
 
@@ -45,8 +46,10 @@ this page is a bug to report.
 message}`, `Protocol(String)`. Match non-exhaustively — variants are added
 as the wire surface grows and a pre-1.0 release may do so without
 semver-breaking you. `Server` carries the raw IRIS `$status` / SQLCODE plus
-decoded text; `Protocol` marks framing desync or an unexpected reply shape;
-`Timeout` marks a dial or socket read that exceeded
+decoded text; for the SQL family the code is the **magnitude** as the wire
+reports it (IRIS's negative SQLCODEs travel unsigned; the `OE` message text
+names the condition), `Protocol` marks framing desync or an unexpected reply
+shape; `Timeout` marks a dial or socket read that exceeded
 `ConnectionOptions::timeout_ms` (the option is a dial + per-read socket
 timeout, not a per-operation budget; both drivers honor it).
 

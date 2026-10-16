@@ -21,6 +21,12 @@
 use crate::wire::list::{Item, ListError, ListReader};
 
 /// Server-negotiated facts captured during the handshake + connect.
+///
+/// The `CN` reply carries several further fields (delimited-id support,
+/// isolation level, an SQL-empty-string flag); go keeps only the banner
+/// and feature options and py stores the extras without acting on them —
+/// autocommit and isolation are fixed in our `CN` request, so the ignored
+/// fields cannot change client behavior and are not surfaced.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionInfo {
     /// Negotiated protocol version (≥ 61 enforced).

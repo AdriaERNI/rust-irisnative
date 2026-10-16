@@ -533,6 +533,62 @@ fn sql_error_code_is_the_wire_magnitude() {
     }
 }
 
+#[test]
+#[ignore = "needs a live IRIS"]
+fn invalid_global_names_are_server_errors_not_client_validation() {
+    // Names go straight to the wire (both references do the same); the
+    // server owns the verdict — pin that it is an Error::Server, never a
+    // client-side panic or a invented local error class.
+    let mut conn = connected();
+    match conn.set(&global!(BAD_NAME_MARK(1)), "x") {
+        Err(Error::Server { .. }) => {}
+        Err(other) => panic!("expected Server error for a bad global, got {other:?}"),
+        Ok(()) => {
+            // A name the server happens to accept must still be killable.
+            conn.kill(&global!(BAD_NAME_MARK)).ok();
+        }
+    }
+    let node = irisnative::Global {
+        name: "BAD#NAME".to_string(),
+        subscripts: vec!["1".to_string()],
+    };
+    // Live probe: the server answers the malformed name with SYNTAX —
+    // server-owned validation, surfaced verbatim.
+    match conn.get::<String>(&node) {
+        Err(Error::Server { code, message }) => {
+            assert_eq!(code.abs(), 1003, "expected <SYNTAX>, got {code}");
+            assert!(message.contains("SYNTAX"), "message {message:?}");
+        }
+        other => panic!("expected Server <SYNTAX>, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "needs a live IRIS"]
+fn integer_string_parameter_binds_by_server_inference() {
+    // Bind type 99 means the server coerces the canonical string: pin the
+    // documented boundary by matching an INT column with Some("42").
+    let mut conn = connected();
+    conn.execute("DROP TABLE IF EXISTS irisnative_live_bind", &[])
+        .expect("drop-if-exists");
+    conn.execute(
+        "CREATE TABLE irisnative_live_bind (id INT PRIMARY KEY)",
+        &[],
+    )
+    .expect("create");
+    conn.execute("INSERT INTO irisnative_live_bind (id) VALUES (42)", &[])
+        .expect("insert");
+    let mut rs = conn
+        .query_params(
+            "SELECT id FROM irisnative_live_bind WHERE id = ?",
+            &[Some("42".into())],
+        )
+        .expect("param select on INT column");
+    assert!(rs.fetch_next().expect("fetch"), "\"42\" must bind to 42");
+    conn.execute("DROP TABLE irisnative_live_bind", &[])
+        .expect("drop");
+}
+
 /// Collect the scenario through THIS crate (mirrors parity_scenario.py).
 fn rust_scenario() -> json::Val {
     use json::Val;

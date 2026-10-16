@@ -255,6 +255,11 @@ impl Connection {
 
     /// Run a parameterized SQL statement (`?` placeholders).
     ///
+    /// Values are passed as canonical M strings; the server infers each
+    /// parameter's type (bind type 99, as go's `toODBC` path does), so
+    /// `"42"` binds into an INT column exactly. Binary/temporal typed
+    /// binding is not exposed.
+    ///
     /// # Errors
     /// As [`Connection::query`].
     pub fn query_params<'a>(
@@ -290,6 +295,11 @@ impl Connection {
     }
 
     /// Set a global node.
+    ///
+    /// Global names and subscripts are not validated client-side: the
+    /// server reports `<SYNTAX>`/`<UNDEFINED>` as [`Error::Server`],
+    /// mirroring both reference drivers (go passes `Set(global)` verbatim;
+    /// py forwards `globalName`).
     ///
     /// # Errors
     /// Transport/server failures.
@@ -382,8 +392,10 @@ impl Connection {
         Ok(d.value || d.subtree)
     }
 
-    /// Next subscript in collation order (cursor-style subtree walk),
-    /// updating `node.subscripts` in place.
+    /// Next subscript in collation order, updating `node.subscripts` in
+    /// place. This is a sibling cursor at M `$ORDER` level (identical to
+    /// go `GlobalNext`/`GlobalPrev`); a subtree-descent walk composes
+    /// `next` + recursion at the call site.
     ///
     /// # Errors
     /// Transport/server failures; the walk ends with `Ok(None)`.
