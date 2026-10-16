@@ -116,3 +116,10 @@ validated: a boot attempt with the plain `IRIS_PASSWORD` env recipe hit the
 same unreliable startup path CI works around, so no conclusion about this
 client against 2026.1 exists either way — the matrix stays honest and does
 not list it.
+
+The 2024.x row stays ⏳ for a different reason: cross-version validation is
+deferred, not skipped silently. The Community Edition images from that
+release line fail to start on the current CI and development hosts (the
+licensing check of that era rejects hosts with 4 or more cores), so a live
+run needs a compatible small-core host before any 2024.x cell can turn
+✅/❌.
