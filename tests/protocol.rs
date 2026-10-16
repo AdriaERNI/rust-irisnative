@@ -501,6 +501,38 @@ fn dropping_the_connection_disconnects_the_server_job() {
     println!("job {job} terminated after Drop sent DC");
 }
 
+#[test]
+#[ignore = "needs a live IRIS"]
+fn large_global_value_round_trips() {
+    // Payloads past 65 534 bytes take the %List 4-byte size prefix; the
+    // server rejects a mis-framed one with status 1139 <LIST> (probe
+    // 2026-10-15), so a green round-trip pins the wire format end-to-end.
+    let mut conn = connected();
+    let big = "Z".repeat(70_000);
+    conn.set(&global!(SFBIG(1)), &big).expect("set 70 KiB");
+    let v: String = conn.get(&global!(SFBIG(1))).expect("get 70 KiB");
+    assert_eq!(v.len(), big.len());
+    assert_eq!(v, big);
+    conn.kill(&global!(SFBIG)).expect("kill subtree");
+    assert!(!conn.is_defined(&global!(SFBIG(1))).expect("gone"));
+}
+
+#[test]
+#[ignore = "needs a live IRIS"]
+fn sql_error_code_is_the_wire_magnitude() {
+    // SQL-family `Error::Server.code` is the magnitude the wire reports
+    // (IRIS's negative SQLCODE travels unsigned; the OE text names the
+    // condition). Pinned here so the documented shape cannot drift.
+    let mut conn = connected();
+    match conn.query("SELECT * FROM irisnative.sign_check") {
+        Err(Error::Server { code, message }) => {
+            assert_eq!(code, 30, "table-not-found magnitude, not signed -30");
+            assert!(message.contains("not found"), "OE text: {message:?}");
+        }
+        other => panic!("expected Server 30, got {other:?}"),
+    }
+}
+
 /// Collect the scenario through THIS crate (mirrors parity_scenario.py).
 fn rust_scenario() -> json::Val {
     use json::Val;
@@ -742,6 +774,50 @@ fn values_agree(a: &json::Val, b: &json::Val) -> bool {
 #[cfg(feature = "async")]
 #[tokio::test]
 #[ignore = "needs a live IRIS"]
+async fn async_close_disconnects_the_server_job() {
+    // close() is the authoritative async disconnect: the server job must
+    // disappear the same way the sync Drop test proves for DC.
+    let mut conn = irisnative::r#async::Connection::connect(options())
+        .await
+        .expect("async connect");
+    let job: i64 = conn
+        .info()
+        .server_job
+        .parse()
+        .expect("job number is numeric");
+    conn.close().await.expect("async close sends DC");
+    drop(conn);
+    let mut watcher = connect(
+        ConnectionOptions::new(
+            env_or("IRISHOST", "127.0.0.1"),
+            "%SYS",
+            env_or("IRISUSER", "_SYSTEM"),
+            env_or("IRISPASSWORD", "SYS"),
+        )
+        .port(env_or("IRISPORT", "1972").parse().unwrap_or(1972)),
+    )
+    .expect("watcher connects to %SYS");
+    let alive = |w: &mut irisnative::Connection| -> bool {
+        let mut rs = w
+            .query(&format!(
+                "SELECT Pid FROM %SYS.ProcessQuery WHERE Pid = {job}"
+            ))
+            .expect("process query");
+        rs.fetch_next().expect("fetch")
+    };
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    while alive(&mut watcher) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "job {job} survived close() — async DC did not disconnect"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+#[ignore = "needs a live IRIS"]
 async fn async_connection_drives_the_same_wire() {
     // the async variant shares codecs and builders; behavior
     // must match the sync path on the same server.
@@ -773,4 +849,67 @@ async fn async_connection_drives_the_same_wire() {
         .expect("async row")
         .expect("one row");
     assert_eq!(row[0].as_text(), "42");
+
+    // Full-surface parity with the sync live tests: definedness, the
+    // order walk (both directions), OREF method + property, and the
+    // void class-method frame all have async twins through the shared
+    // builders/decoders.
+    conn.global_kill("SFPA", &[]).await.expect("kill root");
+    for i in 1..=3 {
+        conn.global_set("SFPA", &[i.to_string()], &format!("v{i}"))
+            .await
+            .expect("async set");
+    }
+    assert!(
+        conn.is_defined("SFPA", &["2".into()])
+            .await
+            .expect("defined")
+    );
+    assert!(
+        conn.is_defined("SFPA", &[]).await.expect("subtree"),
+        "root is defined by its subtree"
+    );
+    let mut walk = Vec::new();
+    let mut ind = String::new();
+    while let Some(sub) = conn
+        .global_next("SFPA", &[], &ind)
+        .await
+        .expect("async next")
+    {
+        walk.push(sub.clone());
+        ind = sub;
+    }
+    assert_eq!(walk, ["1", "2", "3"]);
+    assert_eq!(
+        conn.global_prev("SFPA", &[], "2")
+            .await
+            .expect("async prev"),
+        Some("1".into())
+    );
+    let oref = conn
+        .class_method("%Net.HttpRequest", "%New", &[])
+        .await
+        .expect("async %New");
+    assert!(oref.contains('@'), "OREF shape {oref}");
+    assert_ne!(
+        conn.method(&oref, "AcceptGzipGet", &[])
+            .await
+            .expect("async OREF method"),
+        ""
+    );
+    conn.property_set(&oref, "Location", "/probe")
+        .await
+        .expect("async property set");
+    assert_eq!(
+        conn.property_get(&oref, "Location")
+            .await
+            .expect("async property get"),
+        "/probe"
+    );
+    conn.class_method_void("%SYSTEM.Version", "GetVersion", &[])
+        .await
+        .expect("async class_method_void");
+    conn.global_kill("SFPA", &[]).await.expect("kill subtree");
+    assert!(!conn.is_defined("SFPA", &["1".into()]).await.expect("gone"));
+    conn.close().await.expect("async close sends DC");
 }

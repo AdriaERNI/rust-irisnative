@@ -54,6 +54,22 @@ pub fn get<T: Transport>(
     decode_get_reply(&reply)
 }
 
+/// Decode a `GLOBAL_ORDER` reply: the next subscript, `None` at the end of
+/// the walk (empty result — go checks `result != ""`). Pure — shared by the
+/// sync and async drivers.
+///
+/// ref: go globals.go:GlobalNext / `GlobalPrev`.
+pub fn decode_order_reply(reply: &Reply) -> Result<Option<String>> {
+    check_sysio(reply)?;
+    match first_item(&reply.body)? {
+        Some(Item::String(s)) if !s.is_empty() => Ok(Some(s)),
+        Some(i) if !matches!(i, Item::Null | Item::Undefined) && !i.as_text().is_empty() => {
+            Ok(Some(i.as_text()))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// `GLOBAL_SET` 0xC242.
 pub fn set<T: Transport>(
     t: &mut T,
@@ -86,14 +102,7 @@ pub fn order<T: Transport>(
 ) -> Result<Option<String>> {
     let c = s.next_count();
     let reply = t.roundtrip(&build_global_order(name, subs, ind, dir, c), c)?;
-    check_sysio(&reply)?;
-    match first_item(&reply.body)? {
-        Some(Item::String(s)) if !s.is_empty() => Ok(Some(s)),
-        Some(i) if !matches!(i, Item::Null | Item::Undefined) && !i.as_text().is_empty() => {
-            Ok(Some(i.as_text()))
-        }
-        _ => Ok(None),
-    }
+    decode_order_reply(&reply)
 }
 
 /// Data/definedness result of `GLOBAL_DATA` 0xC249.
@@ -105,13 +114,12 @@ pub struct Data {
     pub subtree: bool,
 }
 
-/// `GLOBAL_DATA` 0xC249.
+/// Decode a `GLOBAL_DATA` reply into definedness. Pure — shared by the
+/// sync and async drivers.
 ///
 /// ref: go globals.go:GlobalIsDefined.
-pub fn data<T: Transport>(t: &mut T, s: &mut Session, name: &str, subs: &[String]) -> Result<Data> {
-    let c = s.next_count();
-    let reply = t.roundtrip(&build_global_data(name, subs, c), c)?;
-    check_sysio(&reply)?;
+pub fn decode_data_reply(reply: &Reply) -> Result<Data> {
+    check_sysio(reply)?;
     let r = match first_item(&reply.body)? {
         Some(Item::Int(v)) => v,
         Some(other) => other
@@ -124,6 +132,15 @@ pub fn data<T: Transport>(t: &mut T, s: &mut Session, name: &str, subs: &[String
         value: r % 10 == 1,
         subtree: r >= 10,
     })
+}
+
+/// `GLOBAL_DATA` 0xC249.
+///
+/// ref: go globals.go:GlobalIsDefined.
+pub fn data<T: Transport>(t: &mut T, s: &mut Session, name: &str, subs: &[String]) -> Result<Data> {
+    let c = s.next_count();
+    let reply = t.roundtrip(&build_global_data(name, subs, c), c)?;
+    decode_data_reply(&reply)
 }
 
 /// sysio `<UNDEFINED>` code.

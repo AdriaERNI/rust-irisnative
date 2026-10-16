@@ -170,6 +170,120 @@ impl Connection {
         driver::check_sysio(&reply)
     }
 
+    /// `GLOBAL_DATA` (0xC249): whether the node or its subtree is defined,
+    /// same rule as [`crate::Connection::is_defined`].
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn is_defined(&mut self, name: &str, subs: &[String]) -> Result<bool> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_global_data(name, subs, c), c)
+            .await?;
+        globals::decode_data_reply(&reply).map(|d| d.value || d.subtree)
+    }
+
+    /// `GLOBAL_ORDER` (0xC245) next: the following subscript in collation
+    /// order, `None` at the end of the walk. Sibling cursor at M
+    /// `$ORDER` level (see [`crate::Connection::next`]).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn global_next(
+        &mut self,
+        name: &str,
+        subs: &[String],
+        ind: &str,
+    ) -> Result<Option<String>> {
+        self.global_order(name, subs, ind, globals::DIR_NEXT).await
+    }
+
+    /// `GLOBAL_ORDER` (0xC245) previous: mirror of
+    /// [`Connection::global_next`](Self::global_next).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn global_prev(
+        &mut self,
+        name: &str,
+        subs: &[String],
+        ind: &str,
+    ) -> Result<Option<String>> {
+        self.global_order(name, subs, ind, globals::DIR_PREV).await
+    }
+
+    async fn global_order(
+        &mut self,
+        name: &str,
+        subs: &[String],
+        ind: &str,
+        dir: i64,
+    ) -> Result<Option<String>> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_global_order(name, subs, ind, dir, c), c)
+            .await?;
+        globals::decode_order_reply(&reply)
+    }
+
+    /// `METHOD_VALUE` (0xC25B): invoke an instance method on an OREF.
+    ///
+    /// # Errors
+    /// Transport/server failures; sysio errors surface as
+    /// [`Error::Server`] like the sync path.
+    pub async fn method(&mut self, oref: &str, name: &str, args: &[String]) -> Result<String> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_method(oref, name, args, false, c), c)
+            .await?;
+        object::decode_value_reply(&reply)
+    }
+
+    /// `PROPERTY_GET` (0xC25D).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn property_get(&mut self, oref: &str, prop: &str) -> Result<String> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_property(oref, prop, None, c), c)
+            .await?;
+        object::decode_value_reply(&reply)
+    }
+
+    /// `PROPERTY_SET` (0xC25E).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn property_set(&mut self, oref: &str, prop: &str, value: &str) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_property(oref, prop, Some(value), c), c)
+            .await?;
+        driver::check_sysio(&reply)
+    }
+
+    /// `CLASSMETHOD_VOID` (0xC24C): invoke a class method, discarding any
+    /// result.
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn class_method_void(
+        &mut self,
+        class: &str,
+        method: &str,
+        args: &[String],
+    ) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(
+                &commands::build_class_method_void(class, method, args, c),
+                c,
+            )
+            .await?;
+        driver::check_sysio(&reply)
+    }
+
     /// `CLASSMETHOD_VALUE` (0xC24B).
     ///
     /// # Errors
