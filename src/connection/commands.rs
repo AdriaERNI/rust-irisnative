@@ -254,7 +254,10 @@ pub fn build_direct_query(
             Some(s) => m.writer.set_sql_str(s),
         }
     }
-    m.writer.set_int(0); // query timeout
+    m.writer.set_int(0); // query timeout: fixed at 0 = never times out
+    // server-side; go exposes SetQueryTimeout (mod.go) and py uses a
+    // socket timeout only — deliberately not surfaced here yet (no API
+    // churn in this release; `timeout_ms` remains the client-side bound).
     m.writer.set_int(max_rows);
     m.dump(count)
 }

@@ -80,7 +80,7 @@ Failures map to `Error::Auth` (bad credentials) or `Error::Server`.
 | SQL | `DQ` query, `DU` update, `FD` fetch | `DQ`/`DU` reuse the direct protocol with the statement id in the header; positional `?` parameters are rewritten server-side to `:%qpar(n)` (go `formatQuery` parity); metadata comes from a binary layout on the `DQ` reply; SQLCODE errors surface as `Error::Server` |
 | Objects | `0xC24B`/`0xC24C` class-method value/void, `0xC25B`/`0xC25C` OREF method, `0xC25D`/`0xC25E` property | OREFs are `%List` items of type `0x19` (e.g. `5@%Net.HttpRequest`); server errors from XDCall (1148 method not found, 1150 class not found, 1197 private) map through the same status decode |
 | Transactions | `TC` / `TR` plus `DU` for `START TRANSACTION` | gated on the negotiated `DurableTransactions` feature bit; nested begin is refused client-side |
-| Session | `HS` `CN` `DC` | `DC` on `Drop` (best-effort), verified by watching the server job disappear in `%SYS` |
+| Session | `HS` `CN` `DC` | `DC` on `Drop`: sync writes it straight to the socket (verified by watching the server job disappear in `%SYS`); async `Drop` is best-effort without a runtime — `async::Connection::close()` is the authoritative disconnect, TCP close is the backstop |
 
 **Embedded Python caveat.** A `[Language = python]` class method, once it
 exists on the server, is invoked exactly like any class method through

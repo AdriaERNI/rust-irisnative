@@ -73,6 +73,7 @@ mod wire {
             Error::Protocol("bad frame".into()).to_string(),
             "protocol error: bad frame"
         );
+        assert_eq!(Error::Timeout.to_string(), "operation timed out");
         let io = Error::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "refused",

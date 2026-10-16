@@ -88,13 +88,11 @@ impl<'a> ItemCursor<'a> {
         if self.done {
             return None;
         }
-        match self.reader.next() {
-            Some(Ok(item)) => Some(item),
-            _ => {
-                self.done = true;
-                None
-            }
+        if let Some(Ok(item)) = self.reader.next() {
+            return Some(item);
         }
+        self.done = true;
+        None
     }
 
     /// Whether the walk can no longer advance.

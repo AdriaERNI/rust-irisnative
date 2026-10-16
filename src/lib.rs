@@ -81,7 +81,10 @@ pub struct ConnectionOptions {
     pub username: String,
     /// IRIS password.
     pub password: String,
-    /// Per-operation socket timeout hint; `None` = blocking default.
+    /// Dial + per-read socket timeout; `None` = block forever. Applies to
+    /// every socket read (not per-operation), matching how py's connect
+    /// timeout and go's deadline behave. The async variant honors it as of
+    /// this release.
     pub timeout_ms: Option<u64>,
 }
 
@@ -188,11 +191,19 @@ pub fn connect(opts: ConnectionOptions) -> Result<Connection> {
                     Err(e) => last_err = e,
                 }
             }
-            opened.ok_or(Error::Io(last_err))?
+            opened.ok_or_else(|| match last_err.kind() {
+                std::io::ErrorKind::TimedOut => Error::Timeout,
+                _ => Error::Io(last_err),
+            })?
         }
         None => std::net::TcpStream::connect((opts.host.as_str(), opts.port))?,
     };
     let mut stream = stream;
+    // Strict ping-pong request/response is exactly what Nagle taxes; go's
+    // net.DialTCP gets TCP_NODELAY from Go's TCPConn default, so dial with
+    // it too (parity: go mod.go Dial). Best-effort like the read timeout
+    // below: a platform that refuses the option still has a working socket.
+    let _ = stream.set_nodelay(true);
     if let Some(ms) = opts.timeout_ms {
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(ms)));
     }
@@ -645,6 +656,12 @@ pub enum Error {
     /// Underlying TCP/IO failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// A dial or socket read exceeded `ConnectionOptions::timeout_ms`.
+    ///
+    /// py-iris raises `socket.timeout` and go surfaces
+    /// `os.ErrDeadlineExceeded` distinctly; this is the same separation.
+    #[error("operation timed out")]
+    Timeout,
     /// Server refused or terminated the authentication handshake.
     #[error("authentication failed")]
     Auth,
@@ -669,6 +686,8 @@ pub use connection::asyncio as r#async;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
+    use std::net::{TcpListener, TcpStream};
 
     #[test]
     fn is_update_query_routes_like_go() {
@@ -676,5 +695,137 @@ mod tests {
         assert!(is_update_query("  insert into T values (1)"));
         assert!(is_update_query("DELETE FROM T"));
         assert!(!is_update_query("SELECT 1"));
+    }
+
+    fn read_frame(s: &mut TcpStream) -> Option<([u8; 2], [u8; 4], Vec<u8>)> {
+        let mut head = [0u8; 14];
+        if s.read_exact(&mut head).is_err() {
+            return None;
+        }
+        let length = u32::from_le_bytes(head[0..4].try_into().unwrap_or([0; 4])) as usize;
+        let mut body = vec![0u8; length];
+        if s.read_exact(&mut body).is_err() {
+            return None;
+        }
+        Some((
+            [head[12], head[13]],
+            head[4..8].try_into().unwrap_or([0; 4]),
+            body,
+        ))
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // fixture bodies are tiny
+    fn write_reply(s: &mut TcpStream, type_word: [u8; 2], count: [u8; 4], body: &[u8]) {
+        let mut frame = Vec::with_capacity(14 + body.len());
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&count);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&type_word);
+        frame.extend_from_slice(body);
+        let _ = s.write_all(&frame);
+        let _ = s.flush();
+    }
+
+    /// Answer one `HS` + `CN` pair like the live server (golden capture
+    /// shapes), then serve `GLOBAL_GET`/`GLOBAL_SET` from a fixed value
+    /// until the client sends `DC`. Offline socket-option/timeout probe.
+    fn serve_mock(mut client: TcpStream) {
+        let _ = client.set_nodelay(true);
+        let Some((type_word, count, _)) = read_frame(&mut client) else {
+            return;
+        };
+        if type_word != *b"HS" {
+            return;
+        }
+        // protocol 69 + feature bits 3 + locale item "Unicode"
+        let mut hs = vec![0x45, 0x00, 0x03, 0x00, 0x09, 0x01];
+        hs.extend_from_slice(b"Unicode");
+        write_reply(&mut client, [0, 0], count, &hs);
+        let Some((type_word, count, _)) = read_frame(&mut client) else {
+            return;
+        };
+        if type_word != *b"CN" {
+            return;
+        }
+        let cn = [
+            0x04u8, 0x01, b'm', // info text
+            0x02, 0x04, // delimited ids 0
+            0x02, 0x04, // ignored 0
+            0x02, 0x04, // isolation 0
+            0x05, 0x01, b'1', b'2', b'3', // server job "123"
+            0x02, 0x04, // sql empty 0
+            0x03, 0x04, 37, // feature options
+        ];
+        write_reply(&mut client, [0, 0], count, &cn);
+        loop {
+            let Some((type_word, count, _)) = read_frame(&mut client) else {
+                return;
+            };
+            if type_word == [0x44, 0x43] {
+                return; // DC
+            }
+            let body: &[u8] = if type_word == [0x41, 0xC2] {
+                &[0x04, 0x01, b'v', b'1'] // GLOBAL_GET -> "v1"
+            } else {
+                &[]
+            };
+            write_reply(&mut client, [0, 0xCA], count, body);
+        }
+    }
+
+    fn mock_server() -> (u16, std::sync::mpsc::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                serve_mock(stream);
+                let _ = tx.send(());
+            }
+        });
+        (port, rx)
+    }
+
+    fn mock_options(port: u16) -> ConnectionOptions {
+        ConnectionOptions::new("127.0.0.1", "USER", "_SYSTEM", "SYS").port(port)
+    }
+
+    #[test]
+    fn sync_dial_sets_tcp_nodelay() {
+        // The superserver protocol is strict ping-pong; Nagle must be off
+        // like go's TCPConn default (go mod.go Dial via net.DialTCP).
+        let (port, done) = mock_server();
+        let mut conn = connect(mock_options(port)).expect("mock connect");
+        assert!(
+            conn.stream.nodelay().expect("nodelay queryable"),
+            "the client socket must run TCP_NODELAY"
+        );
+        let v: String = conn.get(&global!(MOCK(1))).expect("mock get");
+        assert_eq!(v, "v1");
+        drop(conn); // sends DC; the mock exits its loop
+        done.recv().expect("mock saw DC and closed");
+    }
+
+    #[test]
+    fn stalled_read_maps_to_timeout_error() {
+        // An expired per-read timeout must be its own error kind, not an
+        // opaque WouldBlock IO error (py socket.timeout / go deadline).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stall");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            while let Ok(s) = listener.accept() {
+                parked.push(s); // accept and never reply
+            }
+        });
+        let opts = ConnectionOptions {
+            timeout_ms: Some(150),
+            ..mock_options(port)
+        };
+        let start = std::time::Instant::now();
+        let err = connect(opts).expect_err("stalled HS reply must fail");
+        assert!(matches!(err, Error::Timeout), "got {err:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 }

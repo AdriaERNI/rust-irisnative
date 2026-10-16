@@ -41,11 +41,14 @@ this page is a bug to report.
 
 ## Errors
 
-`Error` is `#[non_exhaustive]`: `Io`, `Auth`, `Server{code, message}`,
-`Protocol(String)`. Match non-exhaustively — variants are added as the wire
-surface grows and a pre-1.0 release may do so without semver-breaking you.
-`Server` carries the raw IRIS `$status` / SQLCODE plus decoded text;
-`Protocol` marks framing desync or an unexpected reply shape.
+`Error` is `#[non_exhaustive]`: `Io`, `Timeout`, `Auth`, `Server{code,
+message}`, `Protocol(String)`. Match non-exhaustively — variants are added
+as the wire surface grows and a pre-1.0 release may do so without
+semver-breaking you. `Server` carries the raw IRIS `$status` / SQLCODE plus
+decoded text; `Protocol` marks framing desync or an unexpected reply shape;
+`Timeout` marks a dial or socket read that exceeded
+`ConnectionOptions::timeout_ms` (the option is a dial + per-read socket
+timeout, not a per-operation budget; both drivers honor it).
 
 ## Design rules (why the surface looks like this)
 

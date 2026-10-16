@@ -90,10 +90,14 @@ pub fn read_reply<R: Read>(reader: &mut R, expect_count: Option<u32>) -> Result<
     // reading until a chunk arrives without it (py-iris
     // __read_message_internal high_bit loop).
     let mut more = header.is_continuation();
+    let mut chunks = 0u32;
     while more {
+        chunks += 1;
+        check_continuation_bound(chunks)?;
         let mut next_head = [0u8; HEADER_SIZE];
         reader.read_exact(&mut next_head).map_err(FrameError::Io)?;
         let nh = Header::parse(&next_head);
+        check_reply_count(&nh, expect_count)?;
         check_total_bound(body.len(), nh.length)?;
         let mut chunk = checked_body(nh.length)?;
         reader.read_exact(&mut chunk).map_err(FrameError::Io)?;
@@ -123,6 +127,14 @@ pub fn check_reply_count(header: &Header, expect_count: Option<u32>) -> Result<(
     Ok(())
 }
 
+/// Hard cap on the number of continuation chunks a single coalesced reply
+/// may span. The 512 MiB body bound alone cannot stop a hostile stream of
+/// zero-length continuations: a chunk with `length = 0` never grows the
+/// body, so the byte bound can never trip and the loop never ends. py
+/// coalesces the same high-bit loop unbounded (`_InStream.py`
+/// `__read_message_internal`); bounding here is stricter, never looser.
+pub const MAX_CONTINUATION_CHUNKS: u32 = 65_536;
+
 /// Reject a coalesced continuation whose combined size would exceed
 /// [`MAX_TOTAL_BODY`] before anything is allocated for it.
 ///
@@ -130,6 +142,19 @@ pub fn check_reply_count(header: &Header, expect_count: Option<u32>) -> Result<(
 /// [`FrameError::Oversized`] when `body_len + next_len` exceeds the bound.
 pub fn check_total_bound(body_len: usize, next_len: u32) -> Result<(), FrameError> {
     if body_len.saturating_add(usize::try_from(next_len).unwrap_or(usize::MAX)) > MAX_TOTAL_BODY {
+        return Err(FrameError::Oversized);
+    }
+    Ok(())
+}
+
+/// Bound the continuation coalescing loop by chunk count, so empty chunks
+/// cannot spin it forever. Shared by the sync reader here and the async
+/// twin so the rule has exactly one definition.
+///
+/// # Errors
+/// [`FrameError::Oversized`] once `chunks` passes [`MAX_CONTINUATION_CHUNKS`].
+pub fn check_continuation_bound(chunks: u32) -> Result<(), FrameError> {
+    if chunks > MAX_CONTINUATION_CHUNKS {
         return Err(FrameError::Oversized);
     }
     Ok(())
@@ -278,6 +303,59 @@ mod tests {
         let mut cur = std::io::Cursor::new(frame);
         let result = read_reply(&mut cur, None);
         assert!(matches!(result, Err(FrameError::Io(_))));
+    }
+
+    #[test]
+    fn endless_zero_length_continuations_are_bounded() {
+        // A stream that never stops sending length-0 continuation headers
+        // must fail by bound, not spin: zero-length chunks never grow the
+        // body, so the byte cap alone cannot trip (probe 2026-10-15: the
+        // unbounded loop spun at 100% CPU with flat RSS until killed).
+        struct EndlessZeros;
+        impl std::io::Read for EndlessZeros {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let header = Header::request(MessageType::new(0, 0), 0, 0, CONTINUATION_BIT)
+                    .encode()
+                    .to_vec();
+                let n = buf.len().min(header.len());
+                buf[..n].copy_from_slice(&header[..n]);
+                Ok(n)
+            }
+        }
+        let result = read_reply(&mut EndlessZeros, Some(0));
+        assert!(matches!(result, Err(FrameError::Oversized)), "{result:?}");
+    }
+
+    #[test]
+    fn truncated_mid_continuation_is_io_error() {
+        let mut chunk1 = Header::request(MessageType::new(0, 0), 2, 3, CONTINUATION_BIT)
+            .encode()
+            .to_vec();
+        chunk1.extend_from_slice(b"aa");
+        chunk1.extend_from_slice(&[0u8; 5]); // second header cut short
+        let mut cur = std::io::Cursor::new(chunk1);
+        let result = read_reply(&mut cur, Some(3));
+        assert!(matches!(
+            result,
+            Err(FrameError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn count_mismatch_inside_continuation_is_desync() {
+        let mut chunk1 = Header::request(MessageType::new(0, 0), 2, 9, CONTINUATION_BIT)
+            .encode()
+            .to_vec();
+        chunk1.extend_from_slice(b"aa");
+        // the continuation chunk echoes a different count
+        let chunk2 = encode_frame(MessageType::new(0, 0), 8, 0, b"bb");
+        chunk1.extend_from_slice(&chunk2);
+        let mut cur = std::io::Cursor::new(chunk1);
+        let result = read_reply(&mut cur, Some(9));
+        assert!(matches!(
+            result,
+            Err(FrameError::Desync { want: 9, got: 8 })
+        ));
     }
 
     #[test]

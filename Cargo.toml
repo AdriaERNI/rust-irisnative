@@ -19,10 +19,10 @@ async = ["dep:tokio"]
 
 [dependencies]
 thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "rt"], optional = true }
+tokio = { version = "1", features = ["net", "io-util", "rt", "time"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
 
 [lints.rust]
 unsafe_code = "deny"

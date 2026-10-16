@@ -117,7 +117,10 @@ def _head(payload_len: int, type_byte: int) -> bytes:
         return bytes([n + 1, type_byte])
     if n <= 0xFFFF:
         return b"\x00" + struct.pack("<H", n) + bytes([type_byte])
-    return b"\x00\x00" + struct.pack("<I", n) + bytes([type_byte])
+    # py _DBList.__set_list_length_type last branch: THREE zero bytes
+    # precede the 4-byte length (the IRIS reader demands this form; a
+    # two-zero prefix corrupts payloads >= 65 535 bytes — live <LIST>).
+    return b"\x00\x00\x00" + struct.pack("<I", n) + bytes([type_byte])
 
 
 # ------------------------------------------------------------- auth obfuscation

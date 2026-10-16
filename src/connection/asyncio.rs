@@ -15,6 +15,9 @@
 // process sized, never from hostile input at these sites (server-supplied
 // lengths are validated in wire::message before allocation).
 
+use std::future::Future;
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream as TcpStreamAsync;
 
@@ -36,18 +39,45 @@ pub struct Connection {
     stream: BufStream<TcpStreamAsync>,
     session: Session,
     tx_open: bool,
+    timeout: Option<Duration>,
+    /// Set once a `DC` has been queued/sent (by `close`), so `Drop` does
+    /// not send a second disconnect for the same session.
+    dc_sent: bool,
+}
+
+/// Apply `ConnectionOptions::timeout_ms` to one IO future — the async twin
+/// of std's dial timeout + `set_read_timeout`. A missed deadline yields
+/// [`Error::Timeout`] (py raises `socket.timeout`, go
+/// `os.ErrDeadlineExceeded` — same distinct signal).
+async fn with_timeout<T>(timeout: Option<Duration>, fut: T) -> Result<T::Output>
+where
+    T: Future,
+{
+    match timeout {
+        None => Ok(fut.await),
+        Some(d) => tokio::time::timeout(d, fut)
+            .await
+            .map_err(|_| Error::Timeout),
+    }
 }
 
 impl Connection {
     /// Dial, handshake (`HS`), and login (`CN`) — async counterpart of
-    /// [`crate::connect`].
+    /// [`crate::connect`]. `opts.timeout_ms` bounds the dial and every
+    /// socket read on this connection, same as the sync path.
     ///
     /// # Errors
-    /// As [`crate::connect`].
+    /// As [`crate::connect`]; a dial deadline miss is [`Error::Timeout`].
     pub async fn connect(opts: ConnectionOptions) -> Result<Self> {
-        let stream = TcpStreamAsync::connect((opts.host.as_str(), opts.port))
-            .await
-            .map_err(Error::Io)?;
+        let timeout = opts.timeout_ms.map(Duration::from_millis);
+        let stream = with_timeout(
+            timeout,
+            TcpStreamAsync::connect((opts.host.as_str(), opts.port)),
+        )
+        .await??;
+        // Nagle taxes this strict ping-pong protocol; go's TCPConn runs
+        // TCP_NODELAY by default, so match it (ref: go mod.go Dial).
+        let _ = stream.set_nodelay(true);
         let mut stream = BufStream::new(stream);
         let mut session = Session::default();
         let (machine, host_ip) = crate::identity_for(&opts.host);
@@ -59,12 +89,34 @@ impl Connection {
             application: "libirisnative",
             host_ip: &host_ip,
         };
-        establish_async(&mut stream, &mut session, &params).await?;
+        establish_async(&mut stream, &mut session, &params, timeout).await?;
         Ok(Self {
             stream,
             session,
             tx_open: false,
+            timeout,
+            dc_sent: false,
         })
+    }
+
+    /// Send `DC` and flush it — the authoritative async disconnect, the
+    /// counterpart of go's `Disconnect()` / py's `close()`. Prefer this
+    /// over relying on `Drop` (see its notes).
+    ///
+    /// # Errors
+    /// [`Error::Io`] if the frame cannot reach the socket.
+    pub async fn close(&mut self) -> Result<()> {
+        if self.dc_sent {
+            return Ok(());
+        }
+        self.dc_sent = true;
+        let frame = commands::build_disconnect(self.session.next_count());
+        with_timeout(self.timeout, self.stream.write_all(&frame))
+            .await?
+            .map_err(Error::Io)?;
+        with_timeout(self.timeout, self.stream.flush())
+            .await?
+            .map_err(Error::Io)
     }
 
     /// Negotiated connection facts.
@@ -272,8 +324,12 @@ impl Connection {
     }
 
     async fn roundtrip(&mut self, frame: &[u8], count: u32) -> Result<Reply> {
-        self.stream.write_all(frame).await.map_err(Error::Io)?;
-        self.stream.flush().await.map_err(Error::Io)?;
+        with_timeout(self.timeout, self.stream.write_all(frame))
+            .await?
+            .map_err(Error::Io)?;
+        with_timeout(self.timeout, self.stream.flush())
+            .await?
+            .map_err(Error::Io)?;
         self.read_reply(Some(count)).await
     }
 
@@ -282,40 +338,55 @@ impl Connection {
     }
 
     async fn read_reply(&mut self, expect_count: Option<u32>) -> Result<Reply> {
-        read_reply_async(&mut self.stream, expect_count).await
+        read_reply_async(&mut self.stream, expect_count, self.timeout).await
     }
 }
 
 impl Drop for Connection {
-    /// Best-effort `DC` before the socket closes. `Drop` cannot await, so
-    /// the frame goes into the `BufStream` buffer (`write` under a runtime
-    /// context) and out with the stream flush at buffer teardown — the
-    /// sync path is the authoritative disconnect.
+    /// Best-effort `DC` before the socket closes.
+    ///
+    /// `Drop` cannot await: the frame is written into the `BufStream`
+    /// buffer and flushed once under a no-op waker, which reaches the wire
+    /// when the socket is immediately writable and is dropped otherwise
+    /// (a tokio `BufStream` has no flush-on-Drop). For an authoritative
+    /// clean disconnect — the server-side job teardown the sync `Drop`
+    /// performs — call [`Connection::close`] before releasing the
+    /// connection, mirroring go `Disconnect()` / py `close()`. TCP close
+    /// remains the backstop either way.
     fn drop(&mut self) {
-        let count = self.session.next_count();
-        let frame = commands::build_disconnect(count);
-        let fut = tokio::io::AsyncWriteExt::write(&mut self.stream, &frame);
-        tokio::pin!(fut);
-        // BufStream::write completes synchronously into its buffer; poll
-        // once with a no-op waker (no runtime needed at drop time).
+        if self.dc_sent {
+            return;
+        }
+        self.dc_sent = true;
+        let frame = commands::build_disconnect(self.session.next_count());
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
+        let mut fut = std::pin::pin!(self.stream.write_all(&frame));
+        if std::future::Future::poll(fut.as_mut(), &mut cx).is_pending() {
+            return;
+        }
+        let mut fut = std::pin::pin!(self.stream.flush());
         let _ = std::future::Future::poll(fut.as_mut(), &mut cx);
     }
 }
 
-async fn read_exact_async<S: AsyncReadExt + Unpin>(s: &mut S, buf: &mut [u8]) -> Result<()> {
+async fn read_exact_async<S: AsyncReadExt + Unpin>(
+    s: &mut S,
+    buf: &mut [u8],
+    timeout: Option<Duration>,
+) -> Result<()> {
     let mut filled = 0;
     while filled < buf.len() {
-        match s.read(&mut buf[filled..]).await.map_err(Error::Io)? {
-            0 => {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed mid-frame",
-                )));
-            }
-            n => filled += n,
+        let n = with_timeout(timeout, s.read(&mut buf[filled..]))
+            .await?
+            .map_err(Error::Io)?;
+        if n == 0 {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed mid-frame",
+            )));
         }
+        filled += n;
     }
     Ok(())
 }
@@ -327,12 +398,13 @@ async fn establish_async(
     stream: &mut BufStream<TcpStreamAsync>,
     session: &mut Session,
     p: &ConnectParams<'_>,
+    timeout: Option<Duration>,
 ) -> Result<()> {
     let c0 = session.next_count();
-    let reply = roundtrip_stream(stream, &commands::build_handshake(), c0).await?;
+    let reply = roundtrip_stream(stream, &commands::build_handshake(), c0, timeout).await?;
     driver::apply_handshake(&reply, session)?;
     let c1 = session.next_count();
-    let reply = roundtrip_stream(stream, &commands::build_connect(p, c1), c1).await?;
+    let reply = roundtrip_stream(stream, &commands::build_connect(p, c1), c1, timeout).await?;
     driver::apply_connect(&reply, session)
 }
 
@@ -340,36 +412,46 @@ async fn roundtrip_stream(
     stream: &mut BufStream<TcpStreamAsync>,
     frame: &[u8],
     count: u32,
+    timeout: Option<Duration>,
 ) -> Result<Reply> {
-    stream.write_all(frame).await.map_err(Error::Io)?;
-    stream.flush().await.map_err(Error::Io)?;
-    read_reply_async(stream, Some(count)).await
+    with_timeout(timeout, stream.write_all(frame))
+        .await?
+        .map_err(Error::Io)?;
+    with_timeout(timeout, stream.flush())
+        .await?
+        .map_err(Error::Io)?;
+    read_reply_async(stream, Some(count), timeout).await
 }
 
 async fn read_reply_async<S: AsyncReadExt + Unpin>(
     s: &mut S,
     expect_count: Option<u32>,
+    timeout: Option<Duration>,
 ) -> Result<Reply> {
     // Same sequence as wire::message::read_reply (count echo -> bounded
     // alloc -> continuation coalesce); only the `read` is async, so the
     // framing policy stays in `wire`.
     let mut head = [0u8; crate::wire::header::HEADER_SIZE];
-    read_exact_async(s, &mut head).await?;
+    read_exact_async(s, &mut head, timeout).await?;
     let header = crate::wire::header::Header::parse(&head);
     message::check_reply_count(&header, expect_count).map_err(driver::map_frame_err)?;
     let mut body = message::body_with_bound(header.length).map_err(driver::map_frame_err)?;
     if header.length > 0 {
-        read_exact_async(s, &mut body).await?;
+        read_exact_async(s, &mut body, timeout).await?;
     }
     let mut more = header.is_continuation();
+    let mut chunks = 0u32;
     while more {
+        chunks += 1;
+        message::check_continuation_bound(chunks).map_err(driver::map_frame_err)?;
         let mut next_head = [0u8; crate::wire::header::HEADER_SIZE];
-        read_exact_async(s, &mut next_head).await?;
+        read_exact_async(s, &mut next_head, timeout).await?;
         let nh = crate::wire::header::Header::parse(&next_head);
+        message::check_reply_count(&nh, expect_count).map_err(driver::map_frame_err)?;
         message::check_total_bound(body.len(), nh.length).map_err(driver::map_frame_err)?;
         let mut chunk = message::body_with_bound(nh.length).map_err(driver::map_frame_err)?;
         if nh.length > 0 {
-            read_exact_async(s, &mut chunk).await?;
+            read_exact_async(s, &mut chunk, timeout).await?;
         }
         body.extend_from_slice(&chunk);
         more = nh.is_continuation();

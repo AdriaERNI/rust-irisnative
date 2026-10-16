@@ -132,11 +132,23 @@ pub fn apply_connect(reply: &Reply, session: &mut Session) -> Result<()> {
 }
 
 /// Maps a framing failure to the crate error type — one place, both
-/// drivers (the async reader reuses the `wire` framing policy).
+/// drivers (the async reader reuses the `wire` framing policy). An expired
+/// socket read arrives here as `WouldBlock`/`TimedOut` from std or tokio;
+/// it becomes [`Error::Timeout`] so callers can branch without inspecting
+/// `io::Error::kind()` (py raises `socket.timeout`, go
+/// `os.ErrDeadlineExceeded` — same distinct signal).
 #[must_use]
 pub fn map_frame_err(e: crate::wire::message::FrameError) -> Error {
     use crate::wire::message::FrameError;
     match e {
+        FrameError::Io(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Error::Timeout
+        }
         FrameError::Io(e) => Error::Io(e),
         FrameError::Oversized => Error::Protocol("frame exceeds safety bound".into()),
         FrameError::Desync { want, got } => {
