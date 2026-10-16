@@ -3,7 +3,7 @@ name = "irisnative"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.85"
-description = "Rust client scaffold for InterSystems IRIS over the native Superserver wire protocol (TCP 1972) — API surface for globals, SQL and class-method calls, no vendor SDK. Pre-release: wire layer not yet implemented."
+description = "Pure-Rust client for InterSystems IRIS over the native Superserver wire protocol (TCP 1972) — globals, SQL, class-method calls and transactions, no vendor SDK. Pre-release: verified against IRIS 2025.3, no TLS."
 license = "MIT"
 repository = "https://github.com/AdriaERNI/rust-irisnative"
 readme = "README.md"
@@ -13,16 +13,16 @@ categories = ["database", "api-bindings"]
 
 [features]
 default = []
-# Planned async connection (tokio runtime supplied by the consumer).
-# Gates no code yet — enabling it changes nothing until the wire layer lands.
+# Async connection variant (tokio runtime supplied by the consumer).
+# Gates `connection::asyncio`, which shares the wire codec and builders.
 async = ["dep:tokio"]
 
 [dependencies]
 thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "rt"], optional = true }
+tokio = { version = "1", features = ["net", "io-util", "rt", "time"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
 
 [lints.rust]
 unsafe_code = "deny"

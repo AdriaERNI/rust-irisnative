@@ -75,7 +75,7 @@ jobs:
           halt
           EOSESS
       - name: Live protocol tests
-        run: cargo test -- --ignored --test-threads=1
+        run: cargo test --features async -- --include-ignored
         env:
           IRISHOST: 127.0.0.1
           IRISPORT: "1972"

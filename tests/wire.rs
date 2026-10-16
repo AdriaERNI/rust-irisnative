@@ -61,7 +61,6 @@ mod wire {
         // Every Display string is part of the surface consumers log; pin one
         // rendering per variant (docs/api.md "Errors").
         assert_eq!(Error::Auth.to_string(), "authentication failed");
-        assert_eq!(Error::NotImplemented.to_string(), "not implemented yet");
         assert_eq!(
             Error::Server {
                 code: -1,
@@ -74,6 +73,7 @@ mod wire {
             Error::Protocol("bad frame".into()).to_string(),
             "protocol error: bad frame"
         );
+        assert_eq!(Error::Timeout.to_string(), "operation timed out");
         let io = Error::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "refused",
