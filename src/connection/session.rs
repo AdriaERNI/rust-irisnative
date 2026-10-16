@@ -137,6 +137,28 @@ mod tests {
     }
 
     #[test]
+    fn counters_wrap_at_u32_max_without_gaps() {
+        // The sequence is wrapping_add (go's uint32 arithmetic): the last
+        // three values before and across the boundary must pin MAX-1 →
+        // MAX → 0, and the echo check on the other side of the wrap must
+        // stay exact (see wire::message tests for the check itself).
+        let mut s = Session {
+            count: u32::MAX - 1,
+            ..Default::default()
+        };
+        assert_eq!(s.next_count(), u32::MAX - 1);
+        assert_eq!(s.next_count(), u32::MAX);
+        assert_eq!(s.next_count(), 0);
+        assert_eq!(s.count, 1);
+        let mut s = Session {
+            statement: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(s.next_statement(), u32::MAX);
+        assert_eq!(s.next_statement(), 0);
+    }
+
+    #[test]
     fn feature_gating_predicates() {
         // ref: go mod.go IsOption*
         let i = ConnectionInfo {
