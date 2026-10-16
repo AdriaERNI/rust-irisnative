@@ -58,6 +58,9 @@ jobs:
           mkdir -p /tmp/crate-check
           tar -xzf target/package/irisnative-*.crate -C /tmp/crate-check
           cd /tmp/crate-check/irisnative-*
+          # Contents gate: the test suite and the license must ship in the
+          # .crate; a dropped include entry fails here, not silently.
+          test -d tests -a -f LICENSE -a -f README.md
           cargo test --all-features
 
   windows:

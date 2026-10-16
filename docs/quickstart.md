@@ -34,12 +34,17 @@ fn main() -> irisnative::Result<()> {
     let opts = ConnectionOptions::new("127.0.0.1", "USER", "_SYSTEM", "SYS");
     let mut conn = connect(opts)?;
     println!("{}", conn.server_version()?);
+    conn.close()?; // authoritative Disconnect; Drop is the backstop
     Ok(())
 }
 ```
 
 Against the dev container this prints the full banner, e.g. `IRIS for UNIX
 (… Containers) 2025.3 (Build 226U) …`.
+
+Rust **1.85** is the MSRV and is enforced by a dedicated CI job
+(`cargo check --all-features --all-targets` on 1.85), so the badge claim
+cannot silently drift.
 
 ## 4. Try the surface
 
@@ -66,8 +71,13 @@ cargo test --features async -- --include-ignored
 
 End-to-end behavior against the server: handshake/auth, global walks, SQL
 lifecycle with parameters and errors, class-method/property calls,
-transactions, Drop-sends-Disconnect, and a parity scenario compared
-value-for-value against the reference wire rules (`tests/protocol.rs`,
-`probes/parity_scenario.py`). No latency or throughput figures exist
-anywhere in this project yet; if benchmarks ever land, they will be
-measured on the CI container and dated.
+transactions, explicit `close()` (and `Drop`) sending Disconnect, and a
+parity scenario compared value-for-value against the reference wire rules
+(`tests/protocol.rs`, `probes/parity_scenario.py` — the Python harness is
+dev-only material: running from an extracted published crate, that one
+test prints a skip note and passes). The long-running `tests/scale.rs`
+suite (soak, connection churn, concurrency hammer) is excluded from the
+per-PR live job with `--skip scale_`; run it explicitly with
+`cargo test --features async --test scale -- --include-ignored`. No
+latency or throughput figures exist anywhere in this project yet; if
+benchmarks ever land, they will be measured on the CI container and dated.

@@ -86,6 +86,9 @@ let v: String = conn.get(&global!(Demo(1))).unwrap();
 
 // Call a server-side Python tool
 let out = conn.class_method("Tool.Report", "Monthly", &["2026-09".into()]).unwrap();
+
+// Clean disconnect (authoritative; Drop is the backstop)
+conn.close().unwrap();
 ```
 
 ## The protocol, honestly
@@ -103,7 +106,9 @@ Practical consequences you should weigh before production use:
   offset, 5-bit rotation) — an obfuscation, not a hash; there is **no salt
   or challenge-response stage** after `CN`, so treat the network as knowing
   your password. Credentials travel via `ConnectionOptions` / environment
-  variables in our examples; never hardcode them.
+  variables in our examples; never hardcode them. Debug output is
+  credential-safe: `ConnectionOptions` renders its password as `"***"` and
+  a live `Connection` never retains the password past the handshake.
 - InterSystems may change the protocol without notice; expect to pin IRIS
   versions and re-run the compatibility suite on upgrades.
 - It is not, as far as publicly stated, licensed for third-party products —
@@ -139,9 +144,10 @@ scenario compared value-for-value against the reference wire rules
 ## MSRV & versions
 
 Rust **1.85** or newer — that is the first release stabilizing
-[edition 2024][edition-2024], which the crate is written in. CI stands up
-IRIS Community **2025.3** for the live-suite leg; that version is the only
-one verified end-to-end so far (see [docs/protocol.md](docs/protocol.md)).
+[edition 2024][edition-2024], which the crate is written in; CI checks the
+claim on 1.85 itself. CI stands up IRIS Community **2025.3** for the
+live-suite leg; that version is the only one verified end-to-end so far
+(see [docs/protocol.md](docs/protocol.md)).
 
 ## License
 
