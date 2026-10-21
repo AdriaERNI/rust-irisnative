@@ -204,7 +204,8 @@ fn call_procedures_answer_fast_on_both_paths() {
         Err(Error::Server { .. }) => {}
         other => panic!("unknown CALL must error server-side, got {other:?}"),
     }
-    // identity query stays in sync (PULL item on the reference loops)
+    // identity query stays in sync (the reference harnesses' read-loop
+    // hangs are not driver-wire facts)
     let mut rs = conn
         .query("SELECT LAST_IDENTITY()")
         .expect("LAST_IDENTITY must answer");

@@ -523,9 +523,9 @@ mod tests {
         assert_eq!(&u[12..14], b"DU");
     }
 
-    // The frames below are exact captures from live IRIS 2025.3 probes
-    // (2026-10-21): pure-stdlib reference-client requests logged byte-for-
-    // byte, replayed here so any encoder drift fails the build.
+    // The frames below were logged byte-for-byte by live IRIS 2025.3
+    // probes (2026-10-21) and are replayed here so any encoder drift
+    // fails the build.
 
     #[test]
     fn lock_frame_matches_live_capture() {

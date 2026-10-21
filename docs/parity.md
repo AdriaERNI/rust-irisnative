@@ -38,7 +38,7 @@ optional (`--driver go`, needs the `go` toolchain).
 | **prepared statements (`PP`/`PQ`)** | no | yes (dbapi executes route `PP`) | `Prepare`/`Stmt` | equivalent — `DQ` re-binds per call; same plans, same results, small per-call prepare overhead instead of a handle |
 | **stored procedures (`CALL`)** | `execute("CALL SQLUser.P()")`; row-returning ones via `query` | `_IRIS.procedure()` (`0xC25A` legacy) | `SP/SQ/SU/SF` constants declared, **zero send sites** — Go calls via `DQ`/`Exec` too | documented — the native-procedure command family is dead code in the references; `CALL` via `DU`/`DQ` is the live path (fixture: `probes/paritycall.cls`; note `User` is a SQL reserved word — qualify `SQLUser` or omit) |
 | **fast-insert flag / `executeMany` batching** | no flag; loop `execute` | dbapi `executemany` | `optFastInsert` extras | documented — a server-side hint for bulk loads; the `DU` loop reaches the same rows (perf knob, not capability) |
-| **`LastInsertId` / identity** | `query("SELECT LAST_IDENTITY()")` | `cursor.lastidentity` | `rows.LastInsertId` | equivalent — no `GG` frame needed; identity is the connection's last insert, so read it right after inserting (or wrap it in a class method). The reference harnesses' read-loop hangs around this (PULL item) are not driver-wire facts: this driver answers it bounded and in-sync, live-tested |
+| **`LastInsertId` / identity** | `query("SELECT LAST_IDENTITY()")` | `cursor.lastidentity` | `rows.LastInsertId` | equivalent — no `GG` frame needed; identity is the connection's last insert, so read it right after inserting (or wrap it in a class method). The reference harnesses' read-loop hangs around this are artifacts of their own fetch loops, not driver-wire facts: this driver answers it bounded and in-sync, live-tested |
 | **multi result sets (`MD`/`MR`)** | no | dbapi `nextset` declared | declared, no send sites | documented — neither reference exercises it on live servers; no user story to match yet |
 | **routine function/procedure (`0xC248/4D/5A`)** | no | `function()`/`doMethod` legacy | no | equivalent — the modern story is `class_method` (what all current drivers compile `{fn}`/`{call}` down to anyway) |
 | **subscript tree view / globals iterator** | `next`/`prev` walk | `IRISGlobalNodeView` | `GlobalNext/Prev` loop | equivalent — `$ORDER` composition gives every subscript; `0xC24A` (`GET_SUBNODES`) would only batch the round-trips |
@@ -63,7 +63,10 @@ optional (`--driver go`, needs the `go` toolchain).
 
 ## Evidence
 
-Live differential captures behind every row: `probes/` scripts
-(`p1_streams_sysio.py`, `p2_sysio_streams.py`, `p6_pull_items.py` wire
-probes; the golden frames in `src/connection/commands.rs` are byte-for-byte
-from them) and the ignored-by-default suites under `tests/`.
+Live differential evidence behind every row: the ignored-by-default suites
+under `tests/` (every new sysio frame is exercised against the live server
+there), the canonical scenario runner `probes/parity_matrix.py`
+(`--driver py` / `--driver rust` / `--driver go`) which compares all
+drivers value-for-value, the golden request frames in
+`src/connection/commands.rs` (byte-for-byte from live captures, replayed in
+CI), and the raw frame dumps under `probes/captures/`.
