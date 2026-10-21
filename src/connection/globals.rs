@@ -13,7 +13,8 @@
 // lengths are validated in wire::message before allocation).
 
 use super::commands::{
-    build_global_data, build_global_get, build_global_kill, build_global_order, build_global_set,
+    build_global_data, build_global_get, build_global_kill, build_global_lock, build_global_order,
+    build_global_set, build_global_unlock, build_increment, build_unlock_all,
 };
 use super::driver::{Transport, check_sysio, first_item};
 use super::session::Session;
@@ -146,3 +147,125 @@ pub fn data<T: Transport>(t: &mut T, s: &mut Session, name: &str, subs: &[String
 /// sysio `<UNDEFINED>` code.
 /// ref: py-iris iris/_`IRIS.py:ERROR_UNDEFINED` = 1009.
 pub const ERROR_UNDEFINED: i32 = 1009;
+
+/// sysio `<TIMEOUT>` code returned by a LOCK whose wait window elapsed
+/// (live capture 2026-10-21: contention reply = 1240 with `<TIMEOUT>`
+/// text; both reference drivers raise the same condition).
+/// ref: py-iris-legacy iris/_IRIS.py:lock (RuntimeError `<TIMEOUT>`).
+pub const ERROR_LOCK_TIMEOUT: i32 = 1240;
+
+/// Decode an `INCREMENT` reply: the node's new value text. Pure — shared by
+/// both drivers.
+///
+/// ref: py-iris-legacy iris/_IRIS.py:increment (returns the new value).
+pub fn decode_increment_reply(reply: &Reply) -> Result<String> {
+    check_sysio(reply)?;
+    Ok(first_item(&reply.body)?
+        .map(|i| i.as_text())
+        .unwrap_or_default())
+}
+
+/// `INCREMENT` 0xC246: add `amount` to the node server-side (atomic — the
+/// get+set composition it replaces would race) and return the new value.
+pub fn increment<T: Transport>(
+    t: &mut T,
+    s: &mut Session,
+    name: &str,
+    subs: &[String],
+    amount: &str,
+) -> Result<String> {
+    let c = s.next_count();
+    let compact = s.info.compact_double;
+    let reply = t.roundtrip(&build_increment(name, subs, amount, compact, c), c)?;
+    decode_increment_reply(&reply)
+}
+
+/// Decode a `LOCK` reply; success is sysio 0, a timed-out wait surfaces
+/// `ERROR_LOCK_TIMEOUT` with the server's `<TIMEOUT>` text. Pure.
+pub fn decode_lock_reply(reply: &Reply) -> Result<()> {
+    check_sysio(reply)
+}
+
+/// `LOCK` 0xC24E: lock a global node (`mode`: "" exclusive, "S" shared,
+/// "E" escalate; `timeout_secs`: negative waits forever, 0 tries once).
+/// The server blocks the *request* while it waits.
+pub fn lock<T: Transport>(
+    t: &mut T,
+    s: &mut Session,
+    name: &str,
+    subs: &[String],
+    mode: &str,
+    timeout_secs: i64,
+) -> Result<()> {
+    let c = s.next_count();
+    let reply = t.roundtrip(&build_global_lock(name, subs, mode, timeout_secs, c), c)?;
+    decode_lock_reply(&reply)
+}
+
+/// `UNLOCK` 0xC24F: release one lock count (`mode` may add `I`/`D`).
+pub fn unlock<T: Transport>(
+    t: &mut T,
+    s: &mut Session,
+    name: &str,
+    subs: &[String],
+    mode: &str,
+) -> Result<()> {
+    let c = s.next_count();
+    let reply = t.roundtrip(&build_global_unlock(name, subs, mode, c), c)?;
+    decode_lock_reply(&reply)
+}
+
+/// `UNLOCK_ALL` 0xC250: release every lock this connection holds
+/// (body-less frame, live-confirmed 2026-10-21).
+pub fn release_all_locks<T: Transport>(t: &mut T, s: &mut Session) -> Result<()> {
+    let c = s.next_count();
+    let reply = t.roundtrip(&build_unlock_all(c), c)?;
+    decode_lock_reply(&reply)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod lock_increment_tests {
+    use super::*;
+    use crate::wire::header::Header;
+    use crate::wire::message::Reply;
+
+    fn reply_with(status: u16, body: Vec<u8>) -> Reply {
+        Reply {
+            header: Header {
+                length: body.len() as u32,
+                count: 0,
+                statement_id: 0,
+                type_word: status.to_le_bytes(),
+            },
+            body,
+        }
+    }
+
+    #[test]
+    fn lock_timeout_surfaces_as_a_server_error() {
+        // captured contention reply: sysio 1240 + "<TIMEOUT>" text
+        let mut w = crate::wire::list::ListWriter::new();
+        w.set_str("<TIMEOUT>");
+        let r = reply_with(0xCA00 + 1240, w.buf);
+        let e = decode_lock_reply(&r).expect_err("1240 fails");
+        assert!(
+            matches!(&e, crate::Error::Server { code, message }
+                if *code == 1240 && message == "<TIMEOUT>"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn increment_value_decodes_through_the_item_text() {
+        let mut w = crate::wire::list::ListWriter::new();
+        w.set_int(5);
+        assert_eq!(
+            decode_increment_reply(&reply_with(0xCA00, w.buf)).unwrap(),
+            "5"
+        );
+        // 8.5 came back as a short DOUBLE item in the live capture
+        let r = reply_with(0xCA00, vec![0x04, 0x08, 0x08, 0x41]);
+        assert_eq!(decode_increment_reply(&r).unwrap(), "8.5");
+    }
+}

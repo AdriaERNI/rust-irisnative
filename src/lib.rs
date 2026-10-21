@@ -66,7 +66,7 @@ pub use connection::session::{ConnectionInfo, Session};
 
 use connection::commands::ConnectParams;
 use connection::driver::establish;
-use connection::{globals, object, sql, tx};
+use connection::{globals, object, sql, streams, tx};
 
 /// Connection options: host, port (default 1972), namespace, credentials.
 #[derive(Debug, Clone)]
@@ -503,10 +503,351 @@ impl Connection {
         self.tx_open
     }
 
+    /// Lock a global node server-side (`LOCK` 0xC24E). `mode` takes the M
+    /// lock modifiers (`""` exclusive, `"S"` shared, `"E"` escalation);
+    /// `timeout_secs` negative waits forever, `0` tries once, `n` waits up
+    /// to `n` seconds. While the server waits, **this request blocks** —
+    /// like the reference drivers, the wait is bounded by the timeout, not
+    /// by spinning: a timed-out lock returns
+    /// `Error::Server { code: 1240, .. }` with `<TIMEOUT>` text (live
+    /// differential, same semantics as the official Python driver).
+    /// Locks are per-connection server state and visible to **every**
+    /// driver speaking the protocol.
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:lock
+    ///
+    /// # Errors
+    /// Transport/server failures; [`Error::Server`] 1240 on timeout.
+    pub fn lock(&mut self, node: &Global, mode: &str, timeout_secs: i64) -> Result<()> {
+        let (stream, session) = self.parts();
+        globals::lock(
+            stream,
+            session,
+            &node.name,
+            &node.subscripts,
+            mode,
+            timeout_secs,
+        )
+    }
+
+    /// Release one lock count on a global node (`UNLOCK` 0xC24F; `mode`
+    /// may add `I` immediate or `D` deferred).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:unlock
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn unlock(&mut self, node: &Global, mode: &str) -> Result<()> {
+        let (stream, session) = self.parts();
+        globals::unlock(stream, session, &node.name, &node.subscripts, mode)
+    }
+
+    /// Release every lock this connection holds (`UNLOCK_ALL` 0xC250).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:releaseAllLocks
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn release_all_locks(&mut self) -> Result<()> {
+        let (stream, session) = self.parts();
+        globals::release_all_locks(stream, session)
+    }
+
+    /// Atomically add `amount` to a global node server-side and return the
+    /// new value (`INCREMENT` 0xC246) — the one wire command that makes
+    /// counters race-free across connections, where a get-then-set
+    /// composition would not. `amount` is a canonical numeric string
+    /// (`"5"`, `"-2"`, `"3.5"`); other text is sent as a string the server
+    /// coerces, mirroring the Python driver's typed marshalling.
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:increment
+    ///
+    /// # Errors
+    /// Transport/server failures; [`Error::Server`] on a non-numeric node.
+    pub fn increment<T: crate::value::Value>(&mut self, node: &Global, amount: &str) -> Result<T> {
+        let (stream, session) = self.parts();
+        let text = globals::increment(stream, session, &node.name, &node.subscripts, amount)?;
+        T::decode(&text)
+    }
+
+    /// Open one nested transaction level (`TSTART` 0xC251). Unlike
+    /// [`Connection::begin`], levels nest: each call raises `$TLEVEL`,
+    /// [`Connection::tcommit`] drops one, and the outermost close commits
+    /// everything (live-proven nesting 0→1→2, and one-level rollback keeps
+    /// the outer level's writes).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:tStart
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn tstart(&mut self) -> Result<()> {
+        let (stream, session) = self.parts();
+        tx::tstart(stream, session)
+    }
+
+    /// End one nested transaction level (`TCOMMIT` 0xC252); at the last
+    /// level this commits the whole transaction. Committing at level 0 is
+    /// the server's error 1125, surfaced as [`Error::Server`] (capture).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:tCommit
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn tcommit(&mut self) -> Result<()> {
+        let (stream, session) = self.parts();
+        tx::tcommit(stream, session)
+    }
+
+    /// Roll back **all** open transaction levels (`TROLLBACK` 0xC253).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:tRollback
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn trollback(&mut self) -> Result<()> {
+        let (stream, session) = self.parts();
+        tx::trollback_all(stream, session)
+    }
+
+    /// Roll back only the innermost transaction level (`TROLLBACK_ONE`
+    /// 0xC254) — the savepoint-style undo the SQL `TR` frame cannot
+    /// express.
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:tRollbackOne
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn trollback_one(&mut self) -> Result<()> {
+        let (stream, session) = self.parts();
+        tx::trollback_one(stream, session)
+    }
+
+    /// Current transaction nesting depth (`GET_TLEVEL` 0xC255; 0 outside
+    /// any transaction).
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:getTLevel
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn tlevel(&mut self) -> Result<u32> {
+        let (stream, session) = self.parts();
+        tx::tlevel(stream, session)
+    }
+
+    /// Create a server-side stream object (`%Stream.*` classes' `%New`).
+    /// SQL stream columns do **not** need this: `SELECT` results decode
+    /// them transparently into [`Connection::query`] values.
+    ///
+    /// ref: go-irisnative src/connection/message_header.go (stream table);
+    /// py-iris-legacy iris/_OutStream.py (object stream semantics)
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn create_stream(&mut self, kind: StreamKind) -> Result<Stream<'_>> {
+        let oref = {
+            let (stream, session) = self.parts();
+            object::class_method(stream, session, kind.class_name(), "%New", &[])?
+        };
+        Ok(Stream {
+            conn: self,
+            oref,
+            kind,
+        })
+    }
+
+    /// Read raw stream content for a stream descriptor/handle bytewise
+    /// (`JS` READ_STREAM, the reference drivers' fetch command). SQL stream
+    /// columns are resolved automatically; this covers handles obtained
+    /// elsewhere (an object reference, a stored descriptor). `size` of `-1`
+    /// reads the whole stream. The server does not advance any position
+    /// through this command (live capture).
+    ///
+    /// ref: go-irisnative src/connection/sql.go:fetchStream
+    ///
+    /// # Errors
+    /// Transport/server failures; a bad handle surfaces the server status
+    /// as [`Error::Server`].
+    pub fn read_stream(&mut self, handle: &[u8], size: i64) -> Result<Vec<u8>> {
+        let (stream, session) = self.parts();
+        streams::read_stream(stream, session, handle, size)
+    }
+
     /// Borrow stream + session together (split-borrow helper for the
     /// command drivers).
     pub(crate) fn parts(&mut self) -> (&mut std::net::TcpStream, &mut Session) {
         (&mut self.stream, &mut self.session)
+    }
+}
+
+/// Which server-side stream class a [`Stream`] runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// Persistent 8-bit stream (`%Stream.GlobalBinary`).
+    Binary,
+    /// Persistent text stream (`%Stream.GlobalCharacter`).
+    Character,
+    /// Job-scoped temporary 8-bit stream (`%Stream.TmpBinary`) — erased
+    /// when the server job ends.
+    TempBinary,
+    /// Job-scoped temporary text stream (`%Stream.TmpCharacter`).
+    TempCharacter,
+}
+
+impl StreamKind {
+    /// The backing class name.
+    #[must_use]
+    pub const fn class_name(self) -> &'static str {
+        match self {
+            Self::Binary => "%Stream.GlobalBinary",
+            Self::Character => "%Stream.GlobalCharacter",
+            Self::TempBinary => "%Stream.TmpBinary",
+            Self::TempCharacter => "%Stream.TmpCharacter",
+        }
+    }
+}
+
+/// A live server-side stream object, created by
+/// [`Connection::create_stream`].
+///
+/// `write`/`read` are byte-preserving: pass binary content as a
+/// byte-per-char string (`(0..=255u8).map(char::from)`, exactly how
+/// global values already travel), and `read` hands bytes back.
+/// `read(size)` fetches that many bytes **from the start** of the stream —
+/// the wire `JS` command is position-less (live capture) — while `read`
+/// with the server's own `Read` method advances the stream cursor
+/// ([`Stream::read_text`], [`Stream::rewind`]).
+#[derive(Debug)]
+pub struct Stream<'a> {
+    conn: &'a mut Connection,
+    oref: String,
+    kind: StreamKind,
+}
+
+impl Stream<'_> {
+    /// The OREF text the server knows this stream by.
+    #[must_use]
+    pub fn oref(&self) -> &str {
+        &self.oref
+    }
+
+    /// The backing class kind.
+    #[must_use]
+    pub fn kind(&self) -> StreamKind {
+        self.kind
+    }
+
+    /// Append `data` to the stream (`Write`); errors surface the `%Status`
+    /// code the server returned.
+    ///
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub fn write(&mut self, data: &str) -> Result<()> {
+        let (stream, session) = self.conn.parts();
+        let status = object::method(
+            stream,
+            session,
+            &self.oref,
+            "Write",
+            &[data.to_string()],
+            false,
+        )?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Read up to `size` bytes from the start of the stream via the wire
+    /// `READ_STREAM` command (`JS`, the Go reference's fetch path —
+    /// sql.go:fetchStream).
+    ///
+    /// # Errors
+    /// Transport/server failures; nonzero stream status surfaces as
+    /// [`Error::Server`].
+    pub fn read(&mut self, size: u64) -> Result<Vec<u8>> {
+        let (stream, session) = self.conn.parts();
+        streams::read_stream(stream, session, self.oref.as_bytes(), size as i64)
+    }
+
+    /// Read the whole stream content.
+    ///
+    /// # Errors
+    /// As [`Stream::read`].
+    pub fn read_all(&mut self) -> Result<Vec<u8>> {
+        let (stream, session) = self.conn.parts();
+        streams::read_stream(stream, session, self.oref.as_bytes(), -1)
+    }
+
+    /// Read `count` characters through the server's `Read` method,
+    /// advancing the stream cursor.
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn read_text(&mut self, count: u64) -> Result<String> {
+        let (stream, session) = self.conn.parts();
+        object::method(
+            stream,
+            session,
+            &self.oref,
+            "Read",
+            &[count.to_string()],
+            false,
+        )
+    }
+
+    /// Rewind the server-side cursor to the start (`Rewind`).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn rewind(&mut self) -> Result<()> {
+        let (stream, session) = self.conn.parts();
+        let status = object::method(stream, session, &self.oref, "Rewind", &[], false)?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Total bytes/characters currently stored (the `Size` property).
+    ///
+    /// # Errors
+    /// Transport/server failures.
+    pub fn size(&mut self) -> Result<i64> {
+        let (stream, session) = self.conn.parts();
+        let text = object::property_get(stream, session, &self.oref, "Size")?;
+        streams::decode_size(&text)
+    }
+
+    /// Persist a (non-temporary) stream so it survives this session
+    /// (`%Save`).
+    ///
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub fn save(&mut self) -> Result<String> {
+        let (stream, session) = self.conn.parts();
+        let status = object::method(stream, session, &self.oref, "%Save", &[], false)?;
+        if streams::status_is_ok(&status) {
+            Ok(status)
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Release the server-side object (`%Close`). Temporary streams vanish
+    /// with the connection anyway; closing frees the storage early.
+    ///
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub fn close(&mut self) -> Result<()> {
+        let (stream, session) = self.conn.parts();
+        let status = object::method(stream, session, &self.oref, "%Close", &[], false)?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
     }
 }
 
@@ -562,6 +903,11 @@ impl ResultSet<'_> {
         let row = sql::next_row(stream, session, state)?;
         if let Some(items) = row {
             self.row = items;
+            // Stream columns arrive as `%List` descriptors; fetch their
+            // content like both reference drivers do (transparent on the
+            // wire, so a CLOB reads back as its text and a BLOB as bytes).
+            let (stream, session) = self.conn.parts();
+            streams::resolve_row(stream, session, &state.columns, &mut self.row)?;
             Ok(true)
         } else {
             self.row = Vec::new();
@@ -641,6 +987,22 @@ pub mod value {
     impl Value for bool {
         fn decode(raw: &str) -> crate::Result<Self> {
             Ok(!raw.is_empty() && raw != "0")
+        }
+    }
+
+    /// Byte-preserving decode for binary payloads (BLOB stream columns,
+    /// binary globals): every char of the wire text must fit one byte, the
+    /// same latin-1 discipline the codec's string items use.
+    impl Value for Vec<u8> {
+        fn decode(raw: &str) -> crate::Result<Self> {
+            let mut out = Vec::with_capacity(raw.len());
+            for ch in raw.chars() {
+                let b = u8::try_from(ch).map_err(|_| {
+                    crate::Error::Protocol(format!("byte-decode: char {ch:?} above 0xFF"))
+                })?;
+                out.push(b);
+            }
+            Ok(out)
         }
     }
 

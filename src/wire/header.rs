@@ -79,7 +79,27 @@ msg_types! {
     COMMIT = b'T', b'C';
     ROLLBACK = b'T', b'R';
     GET_SERVER_ERROR = b'O', b'E';
+    GLOBAL_INCREMENT = 0x46, 0xC2;
+    GLOBAL_LOCK = 0x4E, 0xC2;
+    GLOBAL_UNLOCK = 0x4F, 0xC2;
+    GLOBAL_UNLOCK_ALL = 0x50, 0xC2;
+    TX_START = 0x51, 0xC2;
+    TX_COMMIT_LEVEL = 0x52, 0xC2;
+    TX_ROLLBACK_ALL = 0x53, 0xC2;
+    TX_ROLLBACK_ONE = 0x54, 0xC2;
+    TX_LEVEL = 0x55, 0xC2;
+    READ_STREAM = b'J', b'S';
 }
+
+// Command identities for the new sysio family. The legacy pure-Python
+// driver numbers them 6, 14, 15, 16, 17..21 and prefixes `code + 0xC240`
+// (`_BufferWriter._write_header_sysio`); the resulting words equal
+// go-irisnative's table entries above — both mappings reproduced live
+// 2026-10-21 (captured request frames for LOCK/UNLOCK/UNLOCK_ALL,
+// INCREMENT, and the tStart family against IRIS 2025.3).
+//
+// ref: go-irisnative src/connection/message_header.go:17-38
+// ref: py-iris-legacy iris/_IRIS.py:20-45 (sysio function codes)
 
 /// An encoded or decoded message header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

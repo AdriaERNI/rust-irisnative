@@ -27,7 +27,9 @@ use super::globals;
 use super::object;
 use super::session::Session;
 use super::sql::{self as sqlcmd, QueryState};
+use super::streams;
 use super::tx;
+use crate::wire::header;
 use crate::wire::list::Item;
 use crate::wire::{message, message::Reply};
 use crate::{ConnectionOptions, Error, Result};
@@ -326,6 +328,8 @@ impl Connection {
             return Err(sqlcmd::sqlcode_error(code, message));
         }
         let meta = sqlcmd::decode_meta(&reply.body);
+        // One push always follows an OK metadata frame (shared framing
+        // rule with the sync driver, sql.rs:direct_query).
         let reply = self.read_push(c).await?;
         let sqlcode = i16::try_from(reply.status()).unwrap_or(i16::MAX);
         if !sqlcmd::sqlcode_is_ok(sqlcode) {
@@ -352,7 +356,21 @@ impl Connection {
             if !sqlcmd::sqlcode_is_ok(st.sqlcode) {
                 return Ok(None);
             }
-            if let Some(row) = sqlcmd::decode_row(st)? {
+            if let Some(mut row) = sqlcmd::decode_row(st)? {
+                // Transparent stream-column decode (sync parity).
+                for (i, item) in row.iter_mut().enumerate() {
+                    if !st
+                        .columns
+                        .get(i)
+                        .is_some_and(|c| streams::is_stream_column(c.type_code))
+                    {
+                        continue;
+                    }
+                    if let Some(handle) = streams::stream_handle(item) {
+                        let data = self.read_stream(&handle, -1).await?;
+                        *item = Item::String(data.iter().map(|b| char::from(*b)).collect());
+                    }
+                }
                 return Ok(Some(row));
             }
             if st.sqlcode == 100 {
@@ -443,6 +461,154 @@ impl Connection {
         Ok(())
     }
 
+    /// `LOCK` (0xC24E): server-side lock on a global node — same blocking
+    /// and `<TIMEOUT>` (sysio 1240) semantics as the sync
+    /// [`crate::Connection::lock`].
+    ///
+    /// ref: py-iris-legacy iris/_IRIS.py:lock
+    /// # Errors
+    /// Transport/server failures; [`Error::Server`] 1240 on timeout.
+    pub async fn lock(
+        &mut self,
+        name: &str,
+        subs: &[String],
+        mode: &str,
+        timeout_secs: i64,
+    ) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(
+                &commands::build_global_lock(name, subs, mode, timeout_secs, c),
+                c,
+            )
+            .await?;
+        globals::decode_lock_reply(&reply)
+    }
+
+    /// `UNLOCK` (0xC24F): release one lock count.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn unlock(&mut self, name: &str, subs: &[String], mode: &str) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_global_unlock(name, subs, mode, c), c)
+            .await?;
+        globals::decode_lock_reply(&reply)
+    }
+
+    /// `UNLOCK_ALL` (0xC250): release every lock this connection holds.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn release_all_locks(&mut self) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self.roundtrip(&commands::build_unlock_all(c), c).await?;
+        globals::decode_lock_reply(&reply)
+    }
+
+    /// `INCREMENT` (0xC246): atomic server-side numeric add; returns the
+    /// node's new value text (the async surface stays text-typed, like
+    /// [`Connection::global_get`]).
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn increment(&mut self, name: &str, subs: &[String], amount: &str) -> Result<String> {
+        let c = self.session.next_count();
+        let compact = self.session.info.compact_double;
+        let reply = self
+            .roundtrip(
+                &commands::build_increment(name, subs, amount, compact, c),
+                c,
+            )
+            .await?;
+        globals::decode_increment_reply(&reply)
+    }
+
+    /// `TSTART` (0xC251): open one nested transaction level.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn tstart(&mut self) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_tlevel_command(header::TX_START, c), c)
+            .await?;
+        tx::check_tlevel_reply(&reply)
+    }
+
+    /// `TCOMMIT` (0xC252): end one transaction level.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn tcommit(&mut self) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(
+                &commands::build_tlevel_command(header::TX_COMMIT_LEVEL, c),
+                c,
+            )
+            .await?;
+        tx::check_tlevel_reply(&reply)
+    }
+
+    /// `TROLLBACK` (0xC253): roll back every open level.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn trollback(&mut self) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(
+                &commands::build_tlevel_command(header::TX_ROLLBACK_ALL, c),
+                c,
+            )
+            .await?;
+        tx::check_tlevel_reply(&reply)
+    }
+
+    /// `TROLLBACK_ONE` (0xC254): roll back the innermost level only.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn trollback_one(&mut self) -> Result<()> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(
+                &commands::build_tlevel_command(header::TX_ROLLBACK_ONE, c),
+                c,
+            )
+            .await?;
+        tx::check_tlevel_reply(&reply)
+    }
+
+    /// `GET_TLEVEL` (0xC255): current transaction nesting depth.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn tlevel(&mut self) -> Result<u32> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_tlevel_command(header::TX_LEVEL, c), c)
+            .await?;
+        tx::decode_tlevel_reply(&reply)
+    }
+
+    /// Create a server-side stream object; mirrors
+    /// [`crate::Connection::create_stream`] (async callers get a
+    /// [`Stream`]).
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn create_stream<'a>(&'a mut self, kind: crate::StreamKind) -> Result<Stream<'a>> {
+        let oref = self.class_method(kind.class_name(), "%New", &[]).await?;
+        Ok(Stream {
+            conn: self,
+            oref,
+            kind,
+        })
+    }
+
+    /// `JS` (READ_STREAM): raw stream content for a handle/descriptor.
+    pub(crate) async fn read_stream(&mut self, handle: &[u8], size: i64) -> Result<Vec<u8>> {
+        let c = self.session.next_count();
+        let reply = self
+            .roundtrip(&commands::build_read_stream(handle, size, c), c)
+            .await?;
+        streams::check_stream_reply(&reply)
+    }
+
     async fn roundtrip(&mut self, frame: &[u8], count: u32) -> Result<Reply> {
         with_timeout(self.timeout, self.stream.write_all(frame))
             .await?
@@ -459,6 +625,113 @@ impl Connection {
 
     async fn read_reply(&mut self, expect_count: Option<u32>) -> Result<Reply> {
         read_reply_async(&mut self.stream, expect_count, self.timeout).await
+    }
+}
+
+/// Async counterpart of [`crate::Stream`]: same commands, awaited IO.
+#[derive(Debug)]
+pub struct Stream<'a> {
+    conn: &'a mut Connection,
+    oref: String,
+    kind: crate::StreamKind,
+}
+
+impl Stream<'_> {
+    /// The OREF text the server knows this stream by.
+    #[must_use]
+    pub fn oref(&self) -> &str {
+        &self.oref
+    }
+
+    /// The backing class kind.
+    #[must_use]
+    pub fn kind(&self) -> crate::StreamKind {
+        self.kind
+    }
+
+    /// Append `data` to the stream (`Write`).
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub async fn write(&mut self, data: &str) -> Result<()> {
+        let status = self
+            .conn
+            .method(&self.oref.clone(), "Write", &[data.to_string()])
+            .await?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Read up to `size` bytes from the start of the stream (`JS`).
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn read(&mut self, size: u64) -> Result<Vec<u8>> {
+        self.conn
+            .read_stream(self.oref.as_bytes(), size as i64)
+            .await
+    }
+
+    /// Read the whole stream content.
+    /// # Errors
+    /// As [`Stream::read`].
+    pub async fn read_all(&mut self) -> Result<Vec<u8>> {
+        self.conn.read_stream(self.oref.as_bytes(), -1).await
+    }
+
+    /// Read `count` characters through the server `Read` method, advancing
+    /// the cursor.
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn read_text(&mut self, count: u64) -> Result<String> {
+        self.conn
+            .method(&self.oref.clone(), "Read", &[count.to_string()])
+            .await
+    }
+
+    /// Rewind the server-side cursor (`Rewind`).
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn rewind(&mut self) -> Result<()> {
+        let status = self.conn.method(&self.oref.clone(), "Rewind", &[]).await?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Total stored bytes/characters (`Size` property).
+    /// # Errors
+    /// Transport/server failures.
+    pub async fn size(&mut self) -> Result<i64> {
+        let text = self.conn.property_get(&self.oref.clone(), "Size").await?;
+        streams::decode_size(&text)
+    }
+
+    /// Persist a (non-temporary) stream (`%Save`).
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub async fn save(&mut self) -> Result<String> {
+        let status = self.conn.method(&self.oref.clone(), "%Save", &[]).await?;
+        if streams::status_is_ok(&status) {
+            Ok(status)
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Release the server-side object (`%Close`).
+    /// # Errors
+    /// Transport/server failures; stream `%Status` errors.
+    pub async fn close(&mut self) -> Result<()> {
+        let status = self.conn.method(&self.oref.clone(), "%Close", &[]).await?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
     }
 }
 
