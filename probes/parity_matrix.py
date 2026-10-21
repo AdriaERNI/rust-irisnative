@@ -7,7 +7,7 @@ JSON except the `driver` field. The Rust side runs it in-process
 `--driver py` runs it through the official Python driver, `--driver go`
 through caretdev/go-irisnative (optional — needs the Go module).
 
-Scenario (canonical payload = sha256 of the 40 000-byte ledger fixture,
+Scenario (canonical payload = sha256 of the 40 000-byte stream fixture,
 byte(i) = 32 + (i*7) % 95 for i in 1..40000):
 
   streams   INSERT CLOB+BLOB inline, SELECT back, sha each column

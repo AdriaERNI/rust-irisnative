@@ -123,7 +123,7 @@ fn increment_returns_the_new_value_atomically() {
     assert_eq!(
         conn.increment::<String>(&node, "3.5").expect("inc 3.5"),
         "8.5",
-        "5 → 8.5 chain (ledger scenario)"
+        "5 → 8.5 chain (increment scenario)"
     );
     assert_eq!(
         conn.increment::<String>(&node, "-2").expect("dec 2"),
