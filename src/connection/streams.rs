@@ -18,10 +18,11 @@
 //!    read ride the already-porting class-method/OREF commands
 //!    (`%New`, `Write`, `Read`, `Rewind`, `%Close`, the `Size` property);
 //!    `read` uses `JS(handle, size)`. `Truncate`/`Erase` are NOT
-//!    implemented by the server's stream classes on IRIS 2025.3 (live
-//!    probe: sysio 1148 `<UNDEFINED>` — they exist only on the
-//!    `%Stream.Interface` contract), and the `Position` property getter is
-//!    unreadable over the wire (sysio 1196); neither is surfaced.
+//!    implemented by the server's concrete stream classes on IRIS 2025.3
+//!    (live probe: sysio 1148 `<UNDEFINED>` — they exist only on the
+//!    `%Stream.Interface` contract): `truncate` is surfaced and answers
+//!    that 1148 where the class lacks it, `Erase` and the `Position`
+//!    property getter are not surfaced over the wire (sysio 1196).
 //!
 //! ref: go-irisnative src/connection/sql.go:fetchStream (JS handle + (-1))
 //! ref: py-iris-legacy iris/_InStream.py/_OutStream.py (stream semantics)
