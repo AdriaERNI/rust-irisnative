@@ -55,7 +55,15 @@ not implemented or not proven yet.
   drivers' positional rotate cipher, namespace attach (no salted
   challenge/response exists on this path — probe-verified, see
   [the protocol doc](docs/protocol.md))
-- [x] Globals: `get` / `set` / `kill` / `next` / subscript walks (`global!` macro)
+- [x] Globals: `get` / `set` / `kill` / `next` / subscript walks (`global!` macro),
+  server-side `lock` / `unlock` / `increment` — cross-driver lock contention
+  and atomic counters proven live
+- [x] Streams: transparent `CLOB`/`BLOB` columns in query results, plus the
+  `%Stream.*` object family (write/read/size/rewind/close) — 40 KB round-trips
+  byte-identical (live)
+- [x] Transactions: flat begin/commit/rollback **and** the nested M levels
+  (`tstart`/`tcommit`/`trollback_one`/`tlevel`) — savepoint semantics the SQL
+  frames cannot express
 - [x] SQL: direct query (`DQ`/`DU`) execute and batched fetch, positional
   parameters (no server-side prepare/cached statements yet)
 - [x] Objects: class-method invocation, OREF instance methods, class-property
@@ -122,14 +130,20 @@ cargo test                         # unit + golden-frame tests (no server needed
 cargo test --features async -- --include-ignored   # live suite (needs the server)
 ```
 
-The live suite (`tests/protocol.rs`) is env-driven — `IRISHOST` (127.0.0.1),
+The live suite (`tests/protocol.rs`, `tests/streams.rs`,
+`tests/globals_tx.rs`) is env-driven — `IRISHOST` (127.0.0.1),
 `IRISPORT` (1972), `IRISUSER` (_SYSTEM), `IRISPASSWORD` (SYS), `IRISNS`
 (USER) — the same variables `examples/connect.rs` reads. On shared hosts
 where 1972 is taken, the dev container may map another port (our box uses
 19720). It drives real round-trips: handshake/auth, globals walks, SQL
-lifecycle, class-method/property calls, transactions, and a parity
-scenario compared value-for-value against the reference wire rules
-(`probes/parity_scenario.py`).
+lifecycle, class-method/property calls, transactions, stream round-trips,
+lock contention, nested transaction levels, and a parity scenario compared
+value-for-value against the reference wire rules
+(`probes/parity_scenario.py`, `probes/parity_matrix.py`). The
+capability verdicts against the official Python and Go drivers — including
+what stays deliberately different — are on the
+[parity page](docs/parity.md); `probes/paritycall.cls` is the stored
+procedure fixture (load with `$system.OBJ.Load`).
 
 - `documentation/` (git-ignored) holds the working protocol notes and raw
   probe output.

@@ -12,6 +12,8 @@ Home of the published documentation (GitHub Pages:
   no latency/throughput figures exist yet, and any that land
   will be measured on the CI container and dated.
 - `api.md` — public-surface tour; rustdoc is generated separately
+- `parity.md` — capability-by-capability parity against the official Python
+  and Go drivers, with the live evidence behind each verdict
   (`cargo doc`) and linked, not duplicated.
 
 Protocol **working notes** are NOT docs: `documentation/` (git-ignored) is
