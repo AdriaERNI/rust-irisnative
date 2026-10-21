@@ -151,7 +151,7 @@ pub const ERROR_UNDEFINED: i32 = 1009;
 /// sysio `<TIMEOUT>` code returned by a LOCK whose wait window elapsed
 /// (live capture 2026-10-21: contention reply = 1240 with `<TIMEOUT>`
 /// text; both reference drivers raise the same condition).
-/// ref: py-iris-legacy iris/_IRIS.py:lock (RuntimeError `<TIMEOUT>`).
+/// ref: py-iris-legacy iris/_IRIS.py:lock (`RuntimeError` `<TIMEOUT>`).
 pub const ERROR_LOCK_TIMEOUT: i32 = 1240;
 
 /// Decode an `INCREMENT` reply: the node's new value text. Pure — shared by

@@ -157,7 +157,7 @@ mod tlevel_tests {
         let status = u16::try_from(0xCA00i32 + code).unwrap_or(0);
         Reply {
             header: Header {
-                length: body.len() as u32,
+                length: u32::try_from(body.len()).unwrap_or_default(),
                 count: 0,
                 statement_id: 0,
                 type_word: status.to_le_bytes(),
