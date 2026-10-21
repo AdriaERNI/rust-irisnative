@@ -600,8 +600,18 @@ impl Connection {
         })
     }
 
-    /// `JS` (`READ_STREAM`): raw stream content for a handle/descriptor.
-    pub(crate) async fn read_stream(&mut self, handle: &[u8], size: i64) -> Result<Vec<u8>> {
+    /// `JS` (`READ_STREAM`): raw stream content for a handle/descriptor
+    /// obtained elsewhere (an object reference, a stored descriptor). SQL
+    /// stream columns are resolved automatically. `size` of `-1` reads the
+    /// whole stream; the server does not advance any position through this
+    /// command (live capture).
+    ///
+    /// ref: go-irisnative src/connection/sql.go:fetchStream
+    ///
+    /// # Errors
+    /// Transport/server failures; a bad handle surfaces the server status
+    /// as [`Error::Server`].
+    pub async fn read_stream(&mut self, handle: &[u8], size: i64) -> Result<Vec<u8>> {
         let c = self.session.next_count();
         let reply = self
             .roundtrip(&commands::build_read_stream(handle, size, c), c)
