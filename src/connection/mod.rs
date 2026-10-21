@@ -9,6 +9,7 @@ pub mod commands;
 pub mod driver;
 pub mod session;
 pub mod sql;
+pub mod streams;
 
 pub mod globals;
 pub mod object;

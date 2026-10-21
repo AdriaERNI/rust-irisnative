@@ -26,3 +26,4 @@ nav:
   - Quick start: quickstart.md
   - The Superserver protocol: protocol.md
   - API: api.md
+  - Driver parity: parity.md

@@ -259,8 +259,14 @@ pub fn direct_query<T: Transport>(
     check_sqlcode(t, s, code)?;
     let meta = decode_meta(&reply.body);
 
-    // first data message arrives as a server push (go sql.go:DirectQuery
+    // First data message arrives as a server push (go sql.go:DirectQuery
     // ReadMessage after metadata; the pushed frame echoes the DQ count).
+    // Live framing rule (captures 2026-10-21): a metadata reply with
+    // status 0 is ALWAYS followed by exactly one push — a data message for
+    // rowsets, an exhausted marker (SQLCODE 100), or a terminal error such
+    // as SQLCODE -400 for a `CALL` without a rowset. Skipping it desyncs
+    // the stream (the next request reads the stale frame); the references
+    // agree, and an error metadata reply carries no push at all.
     let reply = t.read_push(c)?;
     let sqlcode = i16::try_from(reply.status()).unwrap_or(i16::MAX);
     check_sqlcode(t, s, sqlcode)?;

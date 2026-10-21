@@ -25,6 +25,14 @@ without a probe is not a claim.
 - `parity_scenario.py` — the live parity oracle: runs the end-to-end
   scenario from `tests/protocol.rs` through `refclient.py` and prints the
   outcome as JSON; the Rust test compares value-for-value.
+- `parity_matrix.py` — the canonical cross-driver scenario runner: stream
+  round-trip, lock contention, increment, and transaction-level scenarios
+  through the official Python driver (`--driver py`) or the Go driver
+  (`--driver go`); `--driver rust` drives the crate's own suites and
+  `--check FILE` diffs two drivers' canonical JSON key-for-key.
+- `paritycall.cls` — the stored-procedure fixture used by
+  `tests/streams.rs`; load it with
+  `do $system.OBJ.Load("/tmp/paritycall.cls","ck")` inside the container.
 
 Regenerating the golden fixture: run `refclient.py` against the dev
 container with a capture wrapper around `_send`/`_recv` (see

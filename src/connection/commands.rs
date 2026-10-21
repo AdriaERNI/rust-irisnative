@@ -18,8 +18,9 @@ use super::VERSION_PROTOCOL;
 use super::auth::{encode_credentials, system_user};
 use crate::wire::header::{
     CLASSMETHOD_VALUE, CLASSMETHOD_VOID, COMMIT, CONNECT, DIRECT_QUERY, DIRECT_UPDATE, DISCONNECT,
-    FETCH_DATA, GET_SERVER_ERROR, GLOBAL_DATA, GLOBAL_GET, GLOBAL_KILL, GLOBAL_ORDER, GLOBAL_SET,
-    HANDSHAKE, METHOD_VALUE, METHOD_VOID, PROPERTY_GET, PROPERTY_SET, ROLLBACK,
+    FETCH_DATA, GET_SERVER_ERROR, GLOBAL_DATA, GLOBAL_GET, GLOBAL_INCREMENT, GLOBAL_KILL,
+    GLOBAL_LOCK, GLOBAL_ORDER, GLOBAL_SET, GLOBAL_UNLOCK, GLOBAL_UNLOCK_ALL, HANDSHAKE,
+    METHOD_VALUE, METHOD_VOID, PROPERTY_GET, PROPERTY_SET, READ_STREAM, ROLLBACK,
 };
 use crate::wire::message::MessageBuilder;
 
@@ -157,6 +158,118 @@ fn global_head(m: &mut MessageBuilder, name: &str, subs: &[String]) {
     for s in subs {
         m.writer.set_subscript(s);
     }
+}
+
+/// `INCREMENT` 0xC246: atomic numeric add on a global node; the reply's
+/// first item is the new value.
+///
+/// The amount rides as a typed item the way the legacy driver marshals a
+/// Python number (`_marshal_one_parameter` → `_stuff_int` / `_stuff_double`
+/// with the negotiated compact flag): canonical integers as int items,
+/// finite decimals as doubles, anything else as a string the server
+/// coerces. Live capture 2026-10-21: `+5` int item → 5, `+3.5` double item
+/// → 8.5, both accepted.
+///
+/// ref: py-iris-legacy iris/_IRIS.py:increment
+#[must_use]
+pub fn build_increment(
+    name: &str,
+    subs: &[String],
+    amount: &str,
+    compact_double: bool,
+    count: u32,
+) -> Vec<u8> {
+    let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+    global_head(&mut m, name, subs);
+    write_increment_amount(&mut m, amount, compact_double);
+    m.dump(count)
+}
+
+/// Append the increment amount as the canonical typed item (see
+/// [`build_increment`]); split out so both drivers encode identically.
+pub fn write_increment_amount(m: &mut MessageBuilder, amount: &str, compact_double: bool) {
+    if let Ok(v) = amount.parse::<i64>() {
+        if v.to_string() == amount {
+            m.writer.set_int(v);
+            return;
+        }
+    }
+    match amount.parse::<f64>() {
+        Ok(f) if f.is_finite() => m.writer.set_f64(f, compact_double),
+        _ => m.writer.set_str(amount),
+    }
+}
+
+/// `LOCK` 0xC24E: server-side lock on a global node. `mode` is the M lock
+/// mode string ("" exclusive, "S" shared, "E" with escalation); `timeout`
+/// is in seconds — negative waits forever, 0 tries once (the server blocks
+/// the request up to the timeout, then answers sysio 1240 `<TIMEOUT>`).
+///
+/// ref: py-iris-legacy iris/_IRIS.py:lock
+#[must_use]
+pub fn build_global_lock(
+    name: &str,
+    subs: &[String],
+    mode: &str,
+    timeout_secs: i64,
+    count: u32,
+) -> Vec<u8> {
+    let mut m = MessageBuilder::new(GLOBAL_LOCK);
+    global_head(&mut m, name, subs);
+    m.writer.set_str(mode);
+    m.writer.set_int(timeout_secs);
+    m.dump(count)
+}
+
+/// `UNLOCK` 0xC24F: decrement the lock count on a global node; the mode
+/// string may add `I` (immediate) or `D` (deferred).
+///
+/// ref: py-iris-legacy iris/_IRIS.py:unlock
+#[must_use]
+pub fn build_global_unlock(name: &str, subs: &[String], mode: &str, count: u32) -> Vec<u8> {
+    let mut m = MessageBuilder::new(GLOBAL_UNLOCK);
+    global_head(&mut m, name, subs);
+    m.writer.set_str(mode);
+    m.dump(count)
+}
+
+/// `UNLOCK_ALL` 0xC250: release every lock held by this connection (empty
+/// body — the frame itself was live-captured 2026-10-21 after a probe pass
+/// that missed it; the server confirms with sysio 0).
+///
+/// ref: py-iris-legacy iris/_IRIS.py:releaseAllLocks
+#[must_use]
+pub fn build_unlock_all(count: u32) -> Vec<u8> {
+    MessageBuilder::new(GLOBAL_UNLOCK_ALL).dump(count)
+}
+
+/// The five body-less sysio transaction-level commands share one builder.
+///
+/// ref: py-iris-legacy iris/_IRIS.py:tStart / tCommit / tRollback /
+/// tRollbackOne / getTLevel
+#[must_use]
+pub fn build_tlevel_command(command: crate::wire::header::MessageType, count: u32) -> Vec<u8> {
+    MessageBuilder::new(command).dump(count)
+}
+
+/// `READ_STREAM` (JS) `4a53`: fetch stream content. The handle is the raw
+/// payload bytes of the row item (a nested `%List` descriptor for SQL
+/// stream columns, or a stream OREF text), and `size` is the byte count —
+/// `-1` for the whole stream. The server never advances a stream position
+/// through this command (probe: two consecutive JS reads of the same
+/// descriptor both start at byte 0).
+///
+/// Statement id 0 is used deliberately: the Go reference stamps a fresh
+/// id here (`fetchStream`), but live capture shows the server keys the
+/// reply on the handle alone, so no statement is allocated.
+///
+/// ref: go-irisnative src/connection/sql.go:fetchStream
+#[must_use]
+pub fn build_read_stream(handle: &[u8], size: i64, count: u32) -> Vec<u8> {
+    let mut m = MessageBuilder::new(READ_STREAM);
+    m.writer.set_bytes(handle);
+    m.writer.set_int(size);
+    m.dump(count)
 }
 
 /// Class method with a result value, `0xC24B`.
@@ -408,6 +521,80 @@ mod tests {
         let u = build_direct_update("DELETE FROM T", &[], 1, 2);
         assert_eq!(&u[8..12], &1u32.to_le_bytes());
         assert_eq!(&u[12..14], b"DU");
+    }
+
+    // The frames below were logged byte-for-byte by live IRIS 2025.3
+    // probes (2026-10-21) and are replayed here so any encoder drift
+    // fails the build.
+
+    #[test]
+    fn lock_frame_matches_live_capture() {
+        // LOCK ^SF.PARITY.LOCK("x") mode "" timeout -1, count 3
+        let f = build_global_lock("SF.PARITY.LOCK", &["x".to_string()], "", -1, 3);
+        assert_eq!(
+            hex::encode_local(&f),
+            "1a00000003000000000000004ec2100153462e5041524954592e4c4f434b03040103017802010205"
+        );
+    }
+
+    #[test]
+    fn increment_int_frame_matches_live_capture() {
+        // INCREMENT ^SF.PARITY.INC +5, count 6
+        let f = build_increment("SF.PARITY.INC", &[], "5", false, 6);
+        assert_eq!(
+            hex::encode_local(&f),
+            "14000000060000000000000046c20f0153462e5041524954592e494e430204030405"
+        );
+    }
+
+    #[test]
+    fn increment_amount_uses_the_canonical_item_forms() {
+        // canonical int -> int item; finite decimal -> double item (compact
+        // when negotiated, py _stuff_double); anything else -> string the
+        // server coerces (all three accepted live 2026-10-21).
+        let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+        write_increment_amount(&mut m, "3.5", false);
+        assert_eq!(&m.writer.buf[..2], &[0x0A, 0x08][..]);
+        assert_eq!(m.writer.buf.len(), 10, "8-byte IEEE double payload");
+        let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+        write_increment_amount(&mut m, "3.5", true);
+        assert_eq!(&m.writer.buf, &[0x04, 0x09, 0x0C, 0x40], "compact double");
+        let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+        write_increment_amount(&mut m, "007", false); // non-canonical digits
+        assert_eq!(&m.writer.buf[..2], &[0x0A, 0x08], "float path, not int");
+        let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+        write_increment_amount(&mut m, "1e2", false); // scientific -> f64 100
+        assert_eq!(&m.writer.buf[..2], &[0x0A, 0x08]);
+        let mut m = MessageBuilder::new(GLOBAL_INCREMENT);
+        write_increment_amount(&mut m, "not-a-number", false);
+        assert_eq!(m.writer.buf[1], 0x01, "string fallback item");
+    }
+
+    #[test]
+    fn tlevel_and_unlock_all_frames_match_live_capture() {
+        use crate::wire::header::{TX_LEVEL, TX_START};
+        assert_eq!(
+            hex::encode_local(&build_tlevel_command(TX_START, 11)),
+            "000000000b0000000000000051c2"
+        );
+        assert_eq!(
+            hex::encode_local(&build_tlevel_command(TX_LEVEL, 12)),
+            "000000000c0000000000000055c2"
+        );
+        assert_eq!(
+            hex::encode_local(&build_unlock_all(4)),
+            "00000000040000000000000050c2"
+        );
+    }
+
+    #[test]
+    fn read_stream_frame_matches_live_capture() {
+        // JS "14@%Stream.TmpBinary" size -1, count 6
+        let f = build_read_stream(b"14@%Stream.TmpBinary", -1, 6);
+        assert_eq!(
+            hex::encode_local(&f),
+            "1800000006000000000000004a5316013134402553747265616d2e546d7042696e6172790205"
+        );
     }
 }
 

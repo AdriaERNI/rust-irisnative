@@ -24,6 +24,24 @@ this page is a bug to report.
 | `global!(Name)` / `global!(Name(sub, ...))` | macro | builds a `Global` reference; subscripts stringify |
 | `conn.get::<T>(&g)` / `set(&g, v)` / `kill(&g)` | | typed via `value::Value`; names/subscripts are **not** validated client-side — the server's `<SYNTAX>`/`<UNDEFINED>` surfaces as `Error::Server`, as in both reference drivers |
 | `conn.next(&mut g) -> Option<String>` | cursor | collation-order subscript walk: sibling cursor at M `$ORDER` level (go `GlobalNext` parity); compose `next` + recursion for subtree descent |
+| `conn.lock(&g, mode, timeout_secs)` / `unlock(&g, mode)` / `release_all_locks()` | server state | M `LOCK` semantics: `mode` ""/`S`/`E`, negative timeout waits forever, `0` tries once; a timed-out wait returns `Error::Server { code: 1240 }` (`<TIMEOUT>`) after the server blocked the request — visible to **every** driver speaking the protocol (cross-driver contention proven live) |
+| `conn.increment::<T>(&g, amount) -> Result<T>` | atomic | server-side add (`0xC246`) returning the new value — the race-free counter that a `get`+`set` composition is not |
+
+## Transactions
+
+| Item | Shape | Notes |
+|---|---|---|
+| `conn.begin()` / `commit()` / `rollback()` | flat | SQL `START TRANSACTION` + `TC`/`TR` frames; one open transaction, nesting is the server's 1125 |
+| `conn.tstart()` / `tcommit()` / `trollback()` / `trollback_one()` / `tlevel()` | nested | the M `TSTART` family (`0xC251`–`0xC255`): `tstart` raises `$TLEVEL`, `tcommit` closes the innermost level (the last one commits everything), `trollback_one` undoes it (savepoint-style), `trollback` erases all levels, `tlevel` reads the depth. Per-connection state; committing at level 0 answers server error 1125 |
+| isolation level | SQL text | `conn.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", &[])` — the reference drivers offer no wire flag either (Go's IL/RC/AN/AF constants have zero send sites; Python's `isolationLevel` kwarg is sugar over the same statement) |
+
+## Streams
+
+| Item | Shape | Notes |
+|---|---|---|
+| `CLOB`/`BLOB` columns in `query` results | transparent | stream descriptors in fetched rows are read server-side (`JS`) and surface as plain values — bind 40 KB inline on `INSERT`, get them back whole on `SELECT`, no extra API (matches the official Python driver's story) |
+| `conn.create_stream(kind) -> Stream` | object | `%Stream.{Global,Temp}{Character,Binary}`: `write` / `read(size)` / `read_all` / `read_text` / `size` / `rewind` / `truncate` / `save` / `close` via the object commands; `close` releases the server object. (`Truncate` is declared only on `%Stream.Interface` in 2025.3 — where the concrete class lacks it, the server's 1148 surfaces as `Error::Server`.) |
+| `conn.read_stream(handle, size) -> Vec<u8>` | raw | the `JS` fetch for a descriptor/OREF obtained elsewhere; `size: -1` reads all. The server does not advance any position through `JS` (capture) — sized reads after `read_all` restart at byte 0; use `rewind`/object `Read` for cursor moves |
 
 ## SQL
 
@@ -33,6 +51,10 @@ this page is a bug to report.
 | `conn.query_params(sql, &[Option<String>])` | | `?` placeholders bind as canonical M strings (server-inferred type, bind type 99 — same wire as go's `toODBC`); binary/temporal typed binding is not exposed |
 | `rs.fetch_next() -> Result<bool>` | | `false` past the last row |
 | `rs.get::<T>(col) -> Result<T>` | | 0-based column index |
+| `conn.execute(sql, params) -> Result<i64>` | | DML, DDL — and **procedures**: `execute("CALL SQLUser.MyProc()", &[])` (the `User` schema name is a SQL reserved word; qualify with `SQLUser` or call unqualified). Row-returning procedures work through `query` |
+| `SELECT LAST_IDENTITY()` | usage | answers fine over this driver (live); it returns the identity **of the current connection's last insert** — query it right after the insert or wrap it in a class method; it is not a session-persistent value |
+| prepared statements | design | no `PP`/`PQ` cached statements yet: `DQ` re-binds parameters server-side every call — the same plan cache the references' non-`Prepare` paths hit |
+
 
 ## Objects / tools
 
