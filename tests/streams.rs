@@ -126,6 +126,14 @@ fn stream_object_lifecycle() {
         stream.rewind().expect("rewind");
         let chunk = stream.read_text(10).expect("Read(10)");
         assert_eq!(chunk, p[..10]);
+        // Truncate exists only on %Stream.Interface in this server build
+        // (dictionary check 2026-10-21): either the content is cut, or the
+        // server's 1148 must surface as an honest error — never a hang.
+        match stream.truncate(4_096) {
+            Ok(()) => assert_eq!(stream.size().expect("size after truncate"), 4_096),
+            Err(Error::Server { code, .. }) if code.abs() == 1148 => {}
+            Err(other) => panic!("unexpected truncate outcome: {other:?}"),
+        }
         stream.close().expect("close frees the object");
     }
     // A corrupt stream handle errors — it must never hang or return data.
@@ -134,6 +142,18 @@ fn stream_object_lifecycle() {
         matches!(err, Err(Error::Server { .. })),
         "bad handle must surface the server status: {err:?}"
     );
+}
+
+/// Whether the parity procedure fixture (`ParityCall_Ping`) is registered
+/// in this namespace — see probes/paritycall.cls.
+fn procedure_fixture_present(conn: &mut irisnative::Connection) -> bool {
+    let mut rs = conn
+        .query(
+            "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES \
+             WHERE ROUTINE_NAME = 'ParityCall_Ping'",
+        )
+        .expect("routines probe");
+    rs.fetch_next().expect("routines rowset")
 }
 
 #[test]
@@ -158,6 +178,28 @@ fn call_procedures_answer_fast_on_both_paths() {
     }
     conn.execute("CALL %Atelier_v1_Utils.Extension_GetStatus()", &[])
         .expect("CALL via execute must succeed");
+    // a real SqlProc procedure (fixture: probes/paritycall.cls, loaded with
+    // `do $system.OBJ.Load("paritycall.cls","ck")`): `CALL` answers via the
+    // no-rowset verdict, and the function form returns its value. The
+    // `User` schema is a SQL reserved word, hence the SQLUser qualifier.
+    if procedure_fixture_present(&mut conn) {
+        match conn.query("CALL SQLUser.ParityCall_Ping()") {
+            Ok(mut rs) => {
+                assert!(!rs.fetch_next().expect("rowset-backed CALL, no hang"));
+            }
+            Err(Error::Server { code: 400, .. }) => {}
+            Err(other) => panic!("unexpected CALL verdict: {other:?}"),
+        }
+        conn.execute("CALL SQLUser.ParityCall_Ping()", &[])
+            .expect("procedure CALL via execute");
+        let mut rs = conn
+            .query("SELECT SQLUser.ParityCall_Echo('hi')")
+            .expect("scalar procedure call");
+        assert!(rs.fetch_next().expect("echo row"));
+        assert_eq!(rs.get::<String>(0).expect("echo value"), "hi");
+    } else {
+        eprintln!("skipping procedure assertions: load probes/paritycall.cls first");
+    }
     match conn.query("CALL User.ParityNoSuchProcedure()") {
         Err(Error::Server { .. }) => {}
         other => panic!("unknown CALL must error server-side, got {other:?}"),

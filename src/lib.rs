@@ -638,7 +638,7 @@ impl Connection {
     /// SQL stream columns do **not** need this: `SELECT` results decode
     /// them transparently into [`Connection::query`] values.
     ///
-    /// ref: go-irisnative src/connection/message_header.go (stream table);
+    /// ref: go-irisnative src/connection/`message_header.go` (stream table);
     /// py-iris-legacy iris/_OutStream.py (object stream semantics)
     ///
     /// # Errors
@@ -656,7 +656,7 @@ impl Connection {
     }
 
     /// Read raw stream content for a stream descriptor/handle bytewise
-    /// (`JS` READ_STREAM, the reference drivers' fetch command). SQL stream
+    /// (`JS` `READ_STREAM`, the reference drivers' fetch command). SQL stream
     /// columns are resolved automatically; this covers handles obtained
     /// elsewhere (an object reference, a stored descriptor). `size` of `-1`
     /// reads the whole stream. The server does not advance any position
@@ -767,7 +767,9 @@ impl Stream<'_> {
     /// [`Error::Server`].
     pub fn read(&mut self, size: u64) -> Result<Vec<u8>> {
         let (stream, session) = self.conn.parts();
-        streams::read_stream(stream, session, self.oref.as_bytes(), size as i64)
+        let size = i64::try_from(size)
+            .map_err(|_| Error::Protocol("stream read size out of range".into()))?;
+        streams::read_stream(stream, session, self.oref.as_bytes(), size)
     }
 
     /// Read the whole stream content.
@@ -803,6 +805,31 @@ impl Stream<'_> {
     pub fn rewind(&mut self) -> Result<()> {
         let (stream, session) = self.conn.parts();
         let status = object::method(stream, session, &self.oref, "Rewind", &[], false)?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Cut the stored content to `length` bytes/characters (the stream
+    /// `Truncate` method).
+    ///
+    /// ref: go-irisnative src/connection/`message_header.go` (stream table);
+    /// py-iris-legacy iris/_OutStream.py
+    ///
+    /// # Errors
+    /// Transport/server failures; a bad length surfaces the server status.
+    pub fn truncate(&mut self, length: i64) -> Result<()> {
+        let (stream, session) = self.conn.parts();
+        let status = object::method(
+            stream,
+            session,
+            &self.oref,
+            "Truncate",
+            &[length.to_string()],
+            false,
+        )?;
         if streams::status_is_ok(&status) {
             Ok(())
         } else {

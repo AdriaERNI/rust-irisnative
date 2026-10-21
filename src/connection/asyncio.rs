@@ -591,7 +591,7 @@ impl Connection {
     /// [`Stream`]).
     /// # Errors
     /// Transport/server failures.
-    pub async fn create_stream<'a>(&'a mut self, kind: crate::StreamKind) -> Result<Stream<'a>> {
+    pub async fn create_stream(&mut self, kind: crate::StreamKind) -> Result<Stream<'_>> {
         let oref = self.class_method(kind.class_name(), "%New", &[]).await?;
         Ok(Stream {
             conn: self,
@@ -600,7 +600,7 @@ impl Connection {
         })
     }
 
-    /// `JS` (READ_STREAM): raw stream content for a handle/descriptor.
+    /// `JS` (`READ_STREAM`): raw stream content for a handle/descriptor.
     pub(crate) async fn read_stream(&mut self, handle: &[u8], size: i64) -> Result<Vec<u8>> {
         let c = self.session.next_count();
         let reply = self
@@ -695,6 +695,22 @@ impl Stream<'_> {
     /// Transport/server failures.
     pub async fn rewind(&mut self) -> Result<()> {
         let status = self.conn.method(&self.oref.clone(), "Rewind", &[]).await?;
+        if streams::status_is_ok(&status) {
+            Ok(())
+        } else {
+            Err(streams::status_error(&status))
+        }
+    }
+
+    /// Cut the stored content to `length` bytes/characters (`Truncate`);
+    /// mirrors [`crate::Stream::truncate`].
+    /// # Errors
+    /// Transport/server failures; a bad length surfaces the server status.
+    pub async fn truncate(&mut self, length: i64) -> Result<()> {
+        let status = self
+            .conn
+            .method(&self.oref.clone(), "Truncate", &[length.to_string()])
+            .await?;
         if streams::status_is_ok(&status) {
             Ok(())
         } else {
