@@ -102,7 +102,7 @@ fn sql_stream_columns_round_trip_transparently() {
         .expect("select null streams");
     assert!(rs.fetch_next().expect("fetch null row"));
     let s: String = rs.get(0).expect("null CLOB");
-    assert!(s.is_empty());
+    assert_eq!(s, "");
 
     cleanup(&mut conn);
 }
